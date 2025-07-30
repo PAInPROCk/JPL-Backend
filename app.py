@@ -1,8 +1,10 @@
 from flask import Flask, jsonify, request
 import mysql.connector
 import pandas as pd
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)  # Allow all origins for now
 
 # ✅ Connect to MySQL database (XAMPP default config)
 db = mysql.connector.connect(
