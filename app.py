@@ -162,6 +162,38 @@ def upload_players():
         db.rollback()
         return jsonify({"error": str(e)}), 500
 
+# ✅ Get current auction player
+@app.route('/current-auction')
+def get_current_auction():
+    cursor = db.cursor(dictionary=True)
+    cursor.execute("""
+        SELECT players.* FROM current_auction
+        JOIN players ON current_auction.player_id = players.id
+        ORDER BY current_auction.id DESC LIMIT 1
+    """)
+    player = cursor.fetchone()
+    cursor.close()
+    return jsonify(player)
+
+# ✅ Set next auction player (admin trigger)
+@app.route('/next-auction', methods=['POST'])
+def next_auction():
+    data = request.get_json()
+    player_id = data.get('player_id')
+
+    if not player_id:
+        return jsonify({"error": "Missing player_id"}), 400
+
+    try:
+        cursor = db.cursor()
+        cursor.execute("INSERT INTO current_auction (player_id) VALUES (%s)", (player_id,))
+        db.commit()
+        cursor.close()
+        return jsonify({"message": "Auction moved to next player"}), 200
+    except Exception as e:
+        db.rollback()
+        return jsonify({"error": str(e)}), 500
+
 # ✅ Run the Flask app
 if __name__ == '__main__':
     app.run(debug=True)
