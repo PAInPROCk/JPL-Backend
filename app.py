@@ -1,10 +1,11 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request , session
 import mysql.connector
 import pandas as pd
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)  # Allow all origins for now
+app.secret_key = "jpl_secret_here"  # Use any strong secret key you like
+CORS(app, supports_credentials=True)  # Enable cookies for session
 
 # ✅ Connect to MySQL database (XAMPP default config)
 db = mysql.connector.connect(
@@ -21,9 +22,27 @@ cursor = db.cursor(dictionary=True)
 def home():
     return "Welcome to JPL Backend!"
 
+# ✅ Login route
+
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    email = data.get('email')
+    password = data.get('password')
+
+    if email == "admin@example.com" and password == "1234": # Hardcoded login (can be replaced with DB check)
+        session['user'] = email
+        return jsonify({"message": "Login successful"}), 200
+    else:
+        return jsonify({"error": "Invalid credentials"}), 401
+
+
 # ✅ Get all players
 @app.route('/players')
 def get_players():
+    if 'user' not in session:
+        return jsonify({"error": "Unauthorized"}), 401  # Block if not logged in
+    
     cursor.execute("SELECT * FROM players")
     players = cursor.fetchall()
     return jsonify(players)
@@ -31,6 +50,9 @@ def get_players():
 # ✅ Get all teams
 @app.route('/teams')
 def get_teams():
+    if 'user' not in session:
+        return jsonify({"error": "Unauthorized"}), 401  # Block if not logged in
+    
     cursor.execute("SELECT * FROM teams")
     teams = cursor.fetchall()
     return jsonify(teams)
@@ -38,6 +60,9 @@ def get_teams():
 # ✅ Get all bids with player and team names
 @app.route('/bids')
 def get_bids():
+    if 'user' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    
     cursor.execute("""
         SELECT 
             bids.id,
@@ -56,6 +81,9 @@ def get_bids():
 # ✅ Add a new bid
 @app.route('/add-bid', methods=['POST'])
 def add_bid():
+    if 'user' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    
     data = request.get_json()
     player_id = data.get('player_id')
     team_id = data.get('team_id')
@@ -78,6 +106,9 @@ def add_bid():
 # ✅ Add a new player
 @app.route('/add-player', methods=['POST'])
 def add_player():
+    if 'user' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    
     data = request.get_json()
     
     name = data.get('name')
@@ -115,6 +146,9 @@ def add_player():
 # ✅ Upload players via CSV and update if exists
 @app.route('/upload-players', methods=['POST'])
 def upload_players():
+    if 'user' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    
     if 'file' not in request.files:
         return jsonify({"error": "CSV file is missing"}), 400
 
@@ -165,6 +199,9 @@ def upload_players():
 # ✅ Get current auction player
 @app.route('/current-auction')
 def get_current_auction():
+    if 'user' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    
     cursor = db.cursor(dictionary=True)
     cursor.execute("""
         SELECT players.* FROM current_auction
@@ -178,6 +215,8 @@ def get_current_auction():
 # ✅ Set next auction player (admin trigger)
 @app.route('/next-auction', methods=['POST'])
 def next_auction():
+    if 'user' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
     data = request.get_json()
     player_id = data.get('player_id')
 
@@ -193,6 +232,23 @@ def next_auction():
     except Exception as e:
         db.rollback()
         return jsonify({"error": str(e)}), 500
+    
+@app.route('/check-auth')
+def check_auth():
+    if 'user' in session:
+        return jsonify({"authenticated": True}), 200
+    else:
+        return jsonify({"authenticated": False}), 401
+
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    if 'user' in session:
+        session.clear()
+        return jsonify({"message": "Logged out successfully"}), 200
+    else:
+        return jsonify({"error": "No user logged in"}), 400
+
 
 # ✅ Run the Flask app
 if __name__ == '__main__':
