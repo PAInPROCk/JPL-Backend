@@ -236,7 +236,8 @@ def next_auction():
 @app.route('/check-auth')
 def check_auth():
     if 'user' in session:
-        return jsonify({"authenticated": True}), 200
+        role = "admin" if session['user'] == "admin@example1.com" else "user"
+        return jsonify({"authenticated": True, "role" : role}), 200
     else:
         return jsonify({"authenticated": False}), 401
 
