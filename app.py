@@ -123,8 +123,6 @@ def register():
 # ✅ Get all teams
 @app.route('/teams')
 def get_teams():
-    if 'user' not in session:
-        return jsonify({"error": "Unauthorized"}), 401
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -373,8 +371,6 @@ def place_bid():
 # ✅ Get all players
 @app.route('/players')
 def get_players():
-    if 'user' not in session:
-        return jsonify({"error": "Unauthorized"}), 401
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
