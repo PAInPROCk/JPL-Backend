@@ -43,7 +43,10 @@ def login():
     cursor.close()
     conn.close()
 
+    print("DEBUG: user from DB",user)
+
     if user and bcrypt.checkpw(password.encode('utf-8'), user['password'].encode('utf-8')):
+        print("DEBUG: password match success")
         session['user'] = {
             'id': user['id'],
             'email': user['email'],
@@ -51,9 +54,11 @@ def login():
         }
         return jsonify({
             "message": "Login successful",
-            "user": session['user']
+            "user": session['user'],
+            "authenticated" : True
         }), 200
     else:
+        print("DEBUG: password match FAIL ❌")
         return jsonify({"error": "Invalid email or password"}), 401
 
 # ✅ Check authentication
