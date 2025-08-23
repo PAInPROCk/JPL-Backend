@@ -55,6 +55,7 @@ def login():
         return jsonify({
             "message": "Login successful",
             "user": session['user'],
+            "role": user['role'],
             "authenticated" : True
         }), 200
     else:
@@ -64,10 +65,12 @@ def login():
 # ✅ Check authentication
 @app.route('/check-auth', methods=['GET'])
 def check_auth():
+    user = session.get('user')
     if 'user' in session:
         return jsonify({
             "authenticated": True,
-            "user": session['user']
+            "user": session['user'],
+            "role": user['role'] 
         }), 200
     else:
         return jsonify({"authenticated": False}), 401
