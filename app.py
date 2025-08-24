@@ -135,11 +135,11 @@ def get_teams():
 @app.route('/add-team', methods=['POST'])
 def add_team():
     # ✅ Authentication check
-    if 'user_id' not in session:
+    if 'user' not in session:
         return jsonify({'error': 'Unauthorized'}), 401
     
     # ✅ Role check (only admin can add teams)
-    if session.get('role') != 'admin':
+    if session['user']['role'] != 'admin':
         return jsonify({'error': 'Forbidden'}), 403
 
     data = request.json
@@ -175,12 +175,13 @@ def add_team():
 @app.route('/upload-teams', methods=['POST'])
 def upload_teams():
     # ✅ Authentication check
-    if 'user_id' not in session:
+    if 'user' not in session:
         return jsonify({'error': 'Unauthorized'}), 401
     
     # ✅ Role check (only admins can upload)
-    if session.get('role') != 'admin':
+    if session['user']['role'] != 'admin':
         return jsonify({'error': 'Forbidden'}), 403
+
 
     # ✅ File presence check
     if 'file' not in request.files:
@@ -257,40 +258,71 @@ def get_bids():
 # ✅ Add a new bid
 @app.route('/add-bid', methods=['POST'])
 def add_bid():
+    # ✅ Authentication check
     if 'user' not in session:
         return jsonify({"error": "Unauthorized"}), 401
+
+    # ✅ Role check (only admin can add bids)
+    if session['user']['role'] != 'admin':
+        return jsonify({"error": "Forbidden"}), 403
 
     data = request.get_json()
     player_id = data.get('player_id')
     team_id = data.get('team_id')
     bid_amount = data.get('bid_amount')
 
+    # ✅ Validation check
     if not player_id or not team_id or not bid_amount:
         return jsonify({"error": "Missing data"}), 400
 
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
+
     try:
+        # ✅ Check if player is in current auction
+        cursor.execute("SELECT player_id FROM current_auction WHERE player_id = %s", (player_id,))
+        if not cursor.fetchone():
+            return jsonify({"error": "Player is not in current auction"}), 400
+
+        # ✅ Check team budget
+        cursor.execute("SELECT budget FROM teams WHERE id = %s", (team_id,))
+        team = cursor.fetchone()
+        if not team:
+            return jsonify({"error": "Team not found"}), 404
+        if team['budget'] < bid_amount:
+            return jsonify({"error": "Insufficient budget"}), 400
+
+        # ✅ Duplicate bid check
+        cursor.execute(
+            "SELECT id FROM bids WHERE player_id = %s AND team_id = %s",
+            (player_id, team_id)
+        )
+        if cursor.fetchone():
+            return jsonify({"error": "Duplicate bid detected"}), 400
+
+        # ✅ Insert new bid
         cursor.execute(
             "INSERT INTO bids (player_id, team_id, bid_amount) VALUES (%s, %s, %s)",
             (player_id, team_id, bid_amount)
         )
         conn.commit()
-        cursor.close()
-        conn.close()
         return jsonify({"message": "Bid added successfully"}), 201
+
     except Exception as e:
         conn.rollback()
+        return jsonify({"error": str(e)}), 500
+
+    finally:
         cursor.close()
         conn.close()
-        return jsonify({"error": str(e)}), 500
+
     
 @app.route('/place-bid', methods=['POST'])
 def place_bid():
     # 🔐 Auth + Role check
-    if 'user_id' not in session:
+    if 'user' not in session:
         return jsonify({'error': 'Unauthorized', 'status': 'error'}), 401
-    if session.get('role') != 'team':
+    if session['user']['role'] != 'team':
         return jsonify({'error': 'Only teams can place bids', 'status': 'error'}), 403
 
     data = request.json
@@ -384,11 +416,11 @@ def get_players():
 @app.route('/add-player', methods=['POST'])
 def add_player():
     # ✅ Authentication check
-    if 'user_id' not in session:
+    if 'user' not in session:
         return jsonify({'error': 'Unauthorized'}), 401
 
     # ✅ Role check (only admin can add players)
-    if session.get('role') != 'admin':
+    if session['user']['role'] != 'admin':
         return jsonify({'error': 'Forbidden'}), 403
 
     data = request.json
@@ -443,15 +475,16 @@ def add_player():
         cursor.close()
         conn.close()
 
+
 # ✅ Upload players via CSV
 @app.route('/upload-players', methods=['POST'])
 def upload_players():
     # ✅ Authentication check
-    if 'user_id' not in session:
+    if 'user' not in session:
         return jsonify({'error': 'Unauthorized'}), 401
 
     # ✅ Role check (only admins can upload)
-    if session.get('role') != 'admin':
+    if session['user']['role'] != 'admin':
         return jsonify({'error': 'Forbidden'}), 403
 
     # ✅ File presence check
@@ -549,9 +582,9 @@ def upload_players():
 @app.route('/start-auction', methods=['POST'])
 def start_auction():
     # 🔐 Auth + Role check
-    if 'user_id' not in session:
+    if 'user' not in session:
         return jsonify({'error': 'Unauthorized', 'status': 'error'}), 401
-    if session.get('role') != 'admin':
+    if session['user'].get('role') != 'admin':
         return jsonify({'error': 'Forbidden', 'status': 'error'}), 403
 
     data = request.json
@@ -615,11 +648,16 @@ def get_current_auction():
     conn.close()
     return jsonify(player)
 
-# ✅ Set next auction player
+# ✅ Move auction to next player
 @app.route('/next-auction', methods=['POST'])
 def next_auction():
+    # 🔐 Auth check
     if 'user' not in session:
         return jsonify({"error": "Unauthorized"}), 401
+
+    # 🔐 Role check (only admin can move to next auction)
+    if session['user'].get('role') != 'admin':
+        return jsonify({"error": "Forbidden"}), 403
 
     data = request.get_json()
     player_id = data.get('player_id')
@@ -629,23 +667,34 @@ def next_auction():
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
+        # ✅ Clear any existing auction
+        cursor.execute("DELETE FROM current_auction")
+
+        # ✅ Insert next player
         cursor.execute("INSERT INTO current_auction (player_id) VALUES (%s)", (player_id,))
         conn.commit()
-        cursor.close()
-        conn.close()
-        return jsonify({"message": "Auction moved to next player"}), 200
+
+        return jsonify({
+            "message": "Auction moved to next player",
+            "player_id": player_id,
+            "status": "auction_moved"
+        }), 200
+
     except Exception as e:
         conn.rollback()
+        return jsonify({"error": str(e)}), 500
+
+    finally:
         cursor.close()
         conn.close()
-        return jsonify({"error": str(e)}), 500
+
     
 @app.route('/end-auction', methods=['POST'])
 def end_auction():
-    # 🔐 Authentication + Role check
-    if 'user_id' not in session:
+    # 🔐 Authentication + Role check (Option 2 style)
+    if 'user' not in session:
         return jsonify({'error': 'Unauthorized', 'status': 'error'}), 401
-    if session.get('role') != 'admin':
+    if session['user'].get('role') != 'admin':
         return jsonify({'error': 'Forbidden', 'status': 'error'}), 403
 
     data = request.json or {}
@@ -776,10 +825,10 @@ def end_auction():
 def reset_auction():
     """Admin-only: Reset current auction and all related bids safely."""
     
-    # 🔐 Authentication & Role check
-    if 'user_id' not in session:
+    # 🔐 Authentication & Role check (Option 2)
+    if 'user' not in session:
         return jsonify({'error': 'Unauthorized', 'status': 'error'}), 401
-    if session.get('role') != 'admin':
+    if session['user'].get('role') != 'admin':
         return jsonify({'error': 'Forbidden', 'status': 'error'}), 403
 
     conn = get_db_connection()
@@ -815,40 +864,57 @@ def reset_auction():
 # Sold 
 @app.route('/sold-players', methods=['GET'])
 def sold_players():
-    """List sold players with their teams and prices."""
-    user, err = require_auth()
-    if err: return err
-    
-    page, limit, offset = get_pagination_params()
+    """List sold players with their teams and prices (with pagination)."""
+
+    # ✅ Authentication check
+    if 'user' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    # ✅ Pagination
+    page = int(request.args.get('page', 1))
+    limit = int(request.args.get('limit', 10))
+    offset = (page - 1) * limit
+
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    
-    cursor.execute("SELECT COUNT(*) AS cnt FROM sold_players")
-    total = cursor.fetchone()['cnt']
-    
-    cursor.execute(
-        """SELECT sp.id, sp.player_id, p.name AS player_name, sp.team_id, t.name AS team_name,
-        sp.sold_price, sp.sold_time
-        FROM sold_players sp
-        JOIN players p ON sp.player_id = p.id
-        JOIN teams t ON sp.team_id = t.id
-        ORDER BY sp.sold_time DESC
-        LIMIT %s OFFSET %s
-        """,
-        (limit, offset)
-        )
-    rows = cursor.fetchall()
-    cursor.close(); conn.close()
-    return jsonify({
-        "data": rows,
-        "meta": {
-            "page": page,
-            "limit": limit,
-            "total": total,
-            "pages": (total + limit - 1) // limit
-            }
-            })
 
+    try:
+        # Total count for pagination
+        cursor.execute("SELECT COUNT(*) AS cnt FROM sold_players")
+        total = cursor.fetchone()['cnt']
+
+        # Fetch paginated sold players
+        cursor.execute(
+            """
+            SELECT sp.id, sp.player_id, p.name AS player_name, 
+                   sp.team_id, t.name AS team_name,
+                   sp.sold_price, sp.sold_time
+            FROM sold_players sp
+            JOIN players p ON sp.player_id = p.id
+            JOIN teams t ON sp.team_id = t.id
+            ORDER BY sp.sold_time DESC
+            LIMIT %s OFFSET %s
+            """,
+            (limit, offset)
+        )
+        rows = cursor.fetchall()
+
+        return jsonify({
+            "data": rows,
+            "meta": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "pages": (total + limit - 1) // limit
+            }
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        cursor.close()
+        conn.close()
 
 # ✅ Run app
 if __name__ == '__main__':
