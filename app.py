@@ -8,7 +8,12 @@ import csv
 
 app = Flask(__name__)
 app.secret_key = "jpl_secret_here"  # ⚠️ Replace with a strong, random secret key
-CORS(app, supports_credentials=True)  # Enable cookies for session auth
+app.config.update(
+    SESSION_COOKIE_SAMESITE = "Lax",
+    SESSION_COOKIE_SECURE = False,
+    SESSION_COOKIE_HTTPONLY=True
+)
+CORS(app, supports_credentials=True, origins=["http://localhost:3000"])  # Enable cookies for session auth
 
 # ✅ Database connection
 def get_db_connection():
@@ -65,6 +70,7 @@ def login():
 # ✅ Check authentication
 @app.route('/check-auth', methods=['GET'])
 def check_auth():
+    print("DEBUG SESSION:", session)
     user = session.get('user')
     if 'user' in session:
         return jsonify({
