@@ -146,6 +146,71 @@ def get_teams():
     conn.close()
     return jsonify(teams)
 
+@app.route('/team/<int:team_id>', methods=['GET', 'PUT'])
+def manage_team(team_id):
+    # ✅ Authentication check
+    if 'user' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        # -------------------------------
+        # 🔹 GET Request → Fetch Team + Sold Players
+        # -------------------------------
+        if request.method == 'GET':
+            cursor.execute("SELECT * FROM teams WHERE id = %s", (team_id,))
+            team = cursor.fetchone()
+
+            if not team:
+                return jsonify({"error": "Team not found"}), 404
+
+            # fetch sold players for this team
+            cursor.execute("""
+                SELECT p.*, sp.sold_price, sp.sold_time
+                FROM sold_players sp
+                JOIN players p ON sp.player_id = p.id
+                WHERE sp.team_id = %s
+            """, (team_id,))
+            sold_players = cursor.fetchall()
+
+            return jsonify({
+                "team": team,
+                "sold_players": sold_players
+            }), 200
+
+        # -------------------------------
+        # 🔹 PUT Request → Update Team (Admin Only)
+        # -------------------------------
+        elif request.method == 'PUT':
+            if session.get('role') != 'admin':
+                return jsonify({"error": "Forbidden"}), 403
+
+            data = request.json
+            name = data.get("name")
+            owner = data.get("owner")
+            budget = data.get("budget")
+
+            cursor.execute("""
+                UPDATE teams SET name = %s, owner = %s, budget = %s
+                WHERE id = %s
+            """, (name, owner, budget, team_id))
+            conn.commit()
+
+            return jsonify({"message": "Team updated successfully"}), 200
+
+    except mysql.connector.Error as err:
+        return jsonify({"error": str(err)}), 500
+
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
 @app.route('/add-team', methods=['POST'])
 def add_team():
     # ✅ Authentication check
@@ -592,6 +657,35 @@ def upload_players():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    
+@app.route('/player/<int:player_id>', methods=['GET'])
+def get_player(player_id):
+    # ✅ Authentication check
+    if 'user' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()   # ✅ Use helper for DB connection
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM players WHERE id = %s", (player_id,))
+        player = cursor.fetchone()
+
+        if not player:
+            return jsonify({"error": "Player not found"}), 404
+
+        return jsonify(player), 200
+
+    except mysql.connector.Error as err:
+        return jsonify({"error": str(err)}), 500
+
+    finally:
+        # ✅ Ensure resources are always closed
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
     
 @app.route('/start-auction', methods=['POST'])
 def start_auction():
