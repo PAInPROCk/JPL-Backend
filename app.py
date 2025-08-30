@@ -48,7 +48,7 @@ def login():
     cursor.close()
     conn.close()
 
-    print("DEBUG: user from DB",user)
+    print("DEBUG: user from DB xampp",user)
 
     if user and bcrypt.checkpw(password.encode('utf-8'), user['password'].encode('utf-8')):
         print("DEBUG: password match success")
