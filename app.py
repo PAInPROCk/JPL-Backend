@@ -1,10 +1,12 @@
-from flask import Flask, jsonify, request, session
+from flask import Flask, jsonify, request, session, send_from_directory
+from werkzeug.utils import secure_filename
 import mysql.connector
 import pandas as pd
 from flask_cors import CORS
 import bcrypt
 import io
 import csv
+import os
 
 app = Flask(__name__)
 app.secret_key = "jpl_secret_here"  # ⚠️ Replace with a strong, random secret key
@@ -221,10 +223,13 @@ def add_team():
     if session['user']['role'] != 'admin':
         return jsonify({'error': 'Forbidden'}), 403
 
-    data = request.json
-    name = data.get('name')
-    owner = data.get('owner')
-    budget = data.get('budget', 0)
+    name = request.form.get('teamName')
+    captain = request.form.get('captain')
+    team_rank = request.form.get('teamRank')
+    total_budget = request.form.get('totalBudget')
+    season_budget = request.form.get('seasonBudget')
+    players_bought = request.form.get('playersBought')
+    image_path = request.form.get('imagePath')
 
     # ✅ Validation check
     if not name:
@@ -235,8 +240,8 @@ def add_team():
 
     try:
         cursor.execute(
-            "INSERT INTO teams (name, owner, budget) VALUES (%s, %s, %s)",
-            (name, owner, budget)
+            "INSERT INTO teams (name, captain, Team_Rank, Total_Budget, budget, Players_Bought, image_path) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (name, captain, team_rank, total_budget, season_budget, players_bought, image_path)
         )
         conn.commit()
         return jsonify({"message": "Team added successfully!"}), 201
@@ -491,41 +496,36 @@ def get_players():
     conn.close()
     return jsonify(players)
 
-# ✅ Add a new player
 @app.route('/add-player', methods=['POST'])
 def add_player():
-    # ✅ Authentication check
+    # 🔐 Authentication check
     if 'user' not in session:
         return jsonify({'error': 'Unauthorized'}), 401
 
-    # ✅ Role check (only admin can add players)
+    # 🔐 Role check
     if session['user']['role'] != 'admin':
         return jsonify({'error': 'Forbidden'}), 403
 
-    data = request.json
-
-    # ✅ Extract fields
-    name = data.get('name')
-    nickname = data.get('nickname')
-    age = data.get('age')
-    category = data.get('category')   # e.g. Batsman, Bowler
-    type_ = data.get('type')          # e.g. Right-hand, Left-hand
-    base_price = data.get('base_price')
-    total_runs = data.get('total_runs', 0)
-    highest_runs = data.get('highest_runs', 0)
-    wickets_taken = data.get('wickets_taken', 0)
-    times_out = data.get('times_out', 0)
-    teams_played = data.get('teams_played')
-    image_path = data.get('image_path')
-    jersey_number = data.get('jersey_number')
+    # ✅ Extract form fields (not JSON)
+    name = request.form.get('playerName')
+    nickname = request.form.get('nickName')
+    age = request.form.get('age')
+    category = request.form.get('category')
+    type_ = request.form.get('style')
+    base_price = request.form.get('basePrice')  # Adjust if you have this field
+    total_runs = request.form.get('totalRuns', 0)
+    highest_runs = request.form.get('highestRuns', 0)
+    wickets_taken = request.form.get('wickets', 0)
+    times_out = request.form.get('outs', 0)
+    teams_played = ",".join(request.form.getlist('teams[]'))  # Multiple teams
+    image_file = request.files.get('image')  # Not yet saving this
+    jersey_number = request.form.get('jerseyNo')
 
     # ✅ Validation
-    if not name or not base_price:
-        return jsonify({"error": "Player name and base price are required"}), 400
+    if not name:
+        return jsonify({"error": "Player name is required"}), 400
     
-    if jersey_number is not None and not str(jersey_number).isdigit():
-        return jsonify({"error": "Jersey number must be numeric"}), 400
-
+    # ✅ Save player to DB
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -536,24 +536,21 @@ def add_player():
              wickets_taken, times_out, teams_played, image_path, jersey_number) 
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            name, nickname, age, category, type_, base_price, 
-            total_runs, highest_runs, wickets_taken, times_out, 
-            teams_played, image_path, jersey_number
+            name, nickname, age, category, type_, base_price, total_runs, highest_runs,
+            wickets_taken, times_out, teams_played, None, jersey_number
         ))
         conn.commit()
-
         return jsonify({"message": "Player added successfully!"}), 201
 
     except mysql.connector.IntegrityError:
-        return jsonify({"error": "Player with same name or jersey number already exists"}), 400
+        return jsonify({"error": "Player with same name or jersey number exists"}), 400
 
     except mysql.connector.Error as err:
-        return jsonify({"error": str(err)}), 400
+        return jsonify({"error": str(err)}), 500
 
     finally:
         cursor.close()
         conn.close()
-
 
 # ✅ Upload players via CSV
 @app.route('/upload-players', methods=['POST'])

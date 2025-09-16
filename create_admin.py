@@ -11,9 +11,9 @@ db = mysql.connector.connect(
 cursor = db.cursor()
 
 # Step 2: Admin credentials
-email = "admin@example.com"       # change if you want
-plain_password = "1234"           # change if you want
-role = "admin"
+email = "admin1@example.com"       # change if you want
+plain_password = "12345"           # change if you want
+role = "team"
 
 # Step 3: Hash the password
 hashed_password = bcrypt.hashpw(plain_password.encode('utf-8'), bcrypt.gensalt())
