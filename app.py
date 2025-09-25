@@ -7,7 +7,15 @@ import bcrypt
 import io
 import csv
 import os
+import uuid
+from flask import send_from_directory
 
+base_dir = os.path.abspath(os.path.dirname(__file__))
+UPLOAD_FOLDER_PLAYERS = os.path.join(base_dir, 'uploads', 'players')
+UPLOAD_FOLDER_TEAMS = os.path.join(base_dir, 'uploads', 'teams')
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
+os.makedirs(UPLOAD_FOLDER_PLAYERS, exist_ok = True)
+os.makedirs(UPLOAD_FOLDER_TEAMS, exist_ok = True)
 app = Flask(__name__)
 app.secret_key = "jpl_secret_here"  # ⚠️ Replace with a strong, random secret key
 app.config.update(
@@ -15,7 +23,12 @@ app.config.update(
     SESSION_COOKIE_SECURE = False,
     SESSION_COOKIE_HTTPONLY=True
 )
+
 CORS(app, supports_credentials=True, origins=["http://localhost:3000"])  # Enable cookies for session auth
+
+def allowed_file(filename):
+    return '.' in filename and \
+        filename.rsplit('.',1)[1].lower() in ALLOWED_EXTENSIONS
 
 # ✅ Database connection
 def get_db_connection():
@@ -229,7 +242,19 @@ def add_team():
     total_budget = request.form.get('totalBudget')
     season_budget = request.form.get('seasonBudget')
     players_bought = request.form.get('playersBought')
-    image_path = request.form.get('imagePath')
+    mobile = request.form.get('mobile')
+    email = request.form.get('emailId')
+
+    
+    image_file = request.files.get('image')
+    image_path = None
+    if image_file and '.' in image_file.filename:
+        ext = image_file.filename.rsplit('.', 1)[1].lower()
+        if ext in ALLOWED_EXTENSIONS:
+            filename = f"{uuid.uuid4().hex}.{ext}"
+            filepath = os.path.join(UPLOAD_FOLDER_TEAMS, filename)
+            image_file.save(filepath)
+            image_path = f'uploads/teams/{filename}'
 
     # ✅ Validation check
     if not name:
@@ -240,8 +265,8 @@ def add_team():
 
     try:
         cursor.execute(
-            "INSERT INTO teams (name, captain, Team_Rank, Total_Budget, budget, Players_Bought, image_path) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (name, captain, team_rank, total_budget, season_budget, players_bought, image_path)
+            "INSERT INTO teams (name, captain, mobile_No, email_Id, Team_Rank, Total_Budget, Season_Budget, Players_Bought, image_path) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (name, captain, mobile, email, team_rank, total_budget, season_budget, players_bought, image_path)
         )
         conn.commit()
         return jsonify({"message": "Team added successfully!"}), 201
@@ -313,6 +338,54 @@ def upload_teams():
         "message": f"Upload complete. Inserted: {inserted}, Skipped: {skipped}"
     }), 201
 
+@app.route('/upload-player-image', methods=['POST'])
+def upload_player_image():
+    if 'user' not in session or session['user']['role'] != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    file = request.files.get('image')
+    if not file or file.filename == '':
+        return jsonify({'error': 'No file provided'}), 400
+
+    if not allowed_file(file.filename):
+        return jsonify({'error': 'Invalid file type'}), 400
+
+    ext = file.filename.rsplit('.', 1)[1].lower()
+    filename = f"{uuid.uuid4().hex}.{ext}"
+    filepath = os.path.join(UPLOAD_FOLDER_PLAYERS, filename)
+    file.save(filepath)
+
+    return jsonify({'image_path': f'uploads/players/{filename}'}), 201
+
+# --- Save uploaded team logo ---
+@app.route('/upload-team-image', methods=['POST'])
+def upload_team_image():
+    if 'user' not in session or session['user']['role'] != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    file = request.files.get('image')
+    if not file or file.filename == '':
+        return jsonify({'error': 'No file provided'}), 400
+
+    if not allowed_file(file.filename):
+        return jsonify({'error': 'Invalid file type'}), 400
+
+    ext = file.filename.rsplit('.', 1)[1].lower()
+    filename = f"{uuid.uuid4().hex}.{ext}"
+    filepath = os.path.join(UPLOAD_FOLDER_TEAMS, filename)
+    file.save(filepath)
+
+    return jsonify({'image_path': f'uploads/teams/{filename}'}), 201
+
+# --- Serve player images ---
+@app.route('/uploads/players/<filename>')
+def serve_player_image(filename):
+    return send_from_directory(UPLOAD_FOLDER_PLAYERS, filename)
+
+# --- Serve team images ---
+@app.route('/uploads/teams/<filename>')
+def serve_team_image(filename):
+    return send_from_directory(UPLOAD_FOLDER_TEAMS, filename)
 
 # ✅ Get all bids
 @app.route('/bids')
@@ -498,59 +571,65 @@ def get_players():
 
 @app.route('/add-player', methods=['POST'])
 def add_player():
-    # 🔐 Authentication check
     if 'user' not in session:
         return jsonify({'error': 'Unauthorized'}), 401
 
-    # 🔐 Role check
     if session['user']['role'] != 'admin':
         return jsonify({'error': 'Forbidden'}), 403
 
-    # ✅ Extract form fields (not JSON)
+    # Extract data from form
     name = request.form.get('playerName')
     nickname = request.form.get('nickName')
     age = request.form.get('age')
     category = request.form.get('category')
     type_ = request.form.get('style')
-    base_price = request.form.get('basePrice')  # Adjust if you have this field
+    base_price = request.form.get('basePrice')
     total_runs = request.form.get('totalRuns', 0)
     highest_runs = request.form.get('highestRuns', 0)
     wickets_taken = request.form.get('wickets', 0)
     times_out = request.form.get('outs', 0)
-    teams_played = ",".join(request.form.getlist('teams[]'))  # Multiple teams
-    image_file = request.files.get('image')  # Not yet saving this
+    teams_played = ",".join(request.form.getlist('teams[]'))
     jersey_number = request.form.get('jerseyNo')
+    mobile_no = request.form.get('mobile')
+    email = request.form.get('emailId')
 
-    # ✅ Validation
+    # Handle the image
+    image_file = request.files.get('image')
+    image_path = None
+    if image_file and '.' in image_file.filename:
+        ext = image_file.filename.rsplit('.', 1)[1].lower()
+        if ext in ALLOWED_EXTENSIONS:
+            filename = f"{uuid.uuid4().hex}.{ext}"
+            filepath = os.path.join(UPLOAD_FOLDER_PLAYERS, filename)
+            image_file.save(filepath)
+            image_path = f'uploads/players/{filename}'
+
     if not name:
         return jsonify({"error": "Player name is required"}), 400
-    
-    # ✅ Save player to DB
+
     conn = get_db_connection()
     cursor = conn.cursor()
-
     try:
         cursor.execute("""
             INSERT INTO players 
             (name, nickname, age, category, type, base_price, total_runs, highest_runs, 
-             wickets_taken, times_out, teams_played, image_path, jersey_number) 
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             wickets_taken, times_out, teams_played, image_path, jersey, mobile_No, email_Id) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             name, nickname, age, category, type_, base_price, total_runs, highest_runs,
-            wickets_taken, times_out, teams_played, None, jersey_number
+            wickets_taken, times_out, teams_played, image_path, jersey_number, mobile_no, email
         ))
         conn.commit()
         return jsonify({"message": "Player added successfully!"}), 201
 
     except mysql.connector.IntegrityError:
         return jsonify({"error": "Player with same name or jersey number exists"}), 400
-
     except mysql.connector.Error as err:
         return jsonify({"error": str(err)}), 500
-
     finally:
         cursor.close()
         conn.close()
+
 
 # ✅ Upload players via CSV
 @app.route('/upload-players', methods=['POST'])
@@ -570,14 +649,22 @@ def upload_players():
     file = request.files['file']
 
     # ✅ File type check
-    if not file.filename.endswith('.csv'):
-        return jsonify({'error': 'Only CSV files are allowed'}), 400
+    if not (file.filename.endswith('.csv') or file.filename.endswith('.xlsx') or file.filename.endswith('.xls')):
+        return jsonify({'error': 'Only CSV or Excel files are allowed'}), 400
 
     try:
         # ✅ Use pandas for flexible column handling
-        df = pd.read_csv(file)
+        filename = file.filename.lower()
+        if filename.endswith('.csv'):
+            df = pd.read_csv(file)
+        elif filename.endswith('.xlsx') or filename.endswith('.xls'):
+            df = pd.read_excel(file)
+        else:
+            return jsonify({'error': 'Only CSV or Excel files are allowed'}), 400
+
 
         # ✅ Minimum required columns
+        df.columns = df.columns.str.strip().str.lower()
         required_cols = {'name', 'base_price'}
         if not required_cols.issubset(df.columns):
             return jsonify({"error": f"CSV must include at least {required_cols}"}), 400
@@ -591,17 +678,29 @@ def upload_players():
             try:
                 # Extract fields safely
                 name = str(row['name']).strip() if pd.notna(row['name']) else None
-                base_price = float(row['base_price']) if pd.notna(row['base_price']) else None
+                base_price = float(row['base_price']).strip() if pd.notna(row['base_price']) else None
 
                 if not name or base_price is None:
                     skipped += 1
                     continue
 
+                # image_file = row.get('image')
+                # image_path = None
+                # if image_file and '.' in image_file.filename:
+                #     ext = image_file.filename.rsplit('.', 1)[1].lower()
+                # if ext in ALLOWED_EXTENSIONS:
+                #     filename = f"{uuid.uuid4().hex}.{ext}"
+                #     filepath = os.path.join(UPLOAD_FOLDER_PLAYERS, filename)
+                #     image_file.save(filepath)
+                #     image_path = f'uploads/players/{filename}'
+
                 # Optional fields
                 nickname = row.get('nickname')
                 age = int(row['age']) if 'age' in row and pd.notna(row['age']) else None
                 category = row.get('category')
-                type_ = row.get('type')
+                type = row.get('type')
+                mobile_no = row.get('mobile_no')
+                email_Id = row.get('email')
                 total_runs = int(row['total_runs']) if 'total_runs' in row and pd.notna(row['total_runs']) else 0
                 highest_runs = int(row['highest_runs']) if 'highest_runs' in row and pd.notna(row['highest_runs']) else 0
                 wickets_taken = int(row['wickets_taken']) if 'wickets_taken' in row and pd.notna(row['wickets_taken']) else 0
@@ -620,24 +719,24 @@ def upload_players():
                         UPDATE players
                         SET base_price=%s, nickname=%s, age=%s, category=%s, type=%s,
                             total_runs=%s, highest_runs=%s, wickets_taken=%s, times_out=%s,
-                            teams_played=%s, image_path=%s, jersey_number=%s
+                            teams_played=%s, image_path=%s, jersey=%s, name=%s, mobile_no=%s, email_Id=%s
                         WHERE name=%s
                     """, (
-                        base_price, nickname, age, category, type_,
+                        base_price, nickname, age, category, type,
                         total_runs, highest_runs, wickets_taken, times_out,
-                        teams_played, image_path, jersey_number, name
+                        teams_played, image_path, jersey_number, name, mobile_no, email_Id
                     ))
                     updated += 1
                 else:
                     # ✅ Insert new
                     cursor.execute("""
                         INSERT INTO players 
-                        (name, base_price, nickname, age, category, type, total_runs, highest_runs, wickets_taken, times_out, teams_played, image_path, jersey_number)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        (name, nickname, age, category, type, jersey, mobile_no, email_Id, base_price, total_runs, highest_runs, wickets_taken, times_out, teams_played, image_path)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
-                        name, base_price, nickname, age, category, type_,
-                        total_runs, highest_runs, wickets_taken, times_out,
-                        teams_played, image_path, jersey_number
+                        name, nickname, age, category, type, jersey_number, mobile_no, email_Id,
+                        base_price, total_runs, highest_runs, wickets_taken, times_out,
+                        teams_played, image_path
                     ))
                     inserted += 1
 
