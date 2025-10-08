@@ -1,50 +1,45 @@
+# ---- eventlet must be first ----
 import eventlet
 eventlet.monkey_patch()
+
+# ---- now normal imports ----
 import threading
-thread_lock = threading.Lock()
-from flask import Flask, jsonify, request, session, send_from_directory
-from werkzeug.utils import secure_filename
-import mysql.connector
-import pandas as pd
-from flask_socketio import SocketIO, emit, join_room, leave_room
-from flask_cors import CORS
-import bcrypt
+import os
 import io
 import csv
-import os
 import uuid
-from flask import send_from_directory
 from datetime import datetime, timedelta, timezone
-from flask import jsonify
-from flask_cors import cross_origin
+import mysql.connector
+import pandas as pd
+import bcrypt
+from flask import Flask, jsonify, request, session, send_from_directory
+from flask_socketio import SocketIO, emit, join_room, leave_room
+from flask_cors import CORS, cross_origin
+from werkzeug.utils import secure_filename
 
-
-
-
+# ---- Flask setup ----
 base_dir = os.path.abspath(os.path.dirname(__file__))
 UPLOAD_FOLDER_PLAYERS = os.path.join(base_dir, 'uploads', 'players')
 UPLOAD_FOLDER_TEAMS = os.path.join(base_dir, 'uploads', 'teams')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
-os.makedirs(UPLOAD_FOLDER_PLAYERS, exist_ok = True)
-os.makedirs(UPLOAD_FOLDER_TEAMS, exist_ok = True)
+os.makedirs(UPLOAD_FOLDER_PLAYERS, exist_ok=True)
+os.makedirs(UPLOAD_FOLDER_TEAMS, exist_ok=True)
+
 app = Flask(__name__)
-app.secret_key = "jpl_secret_here"  # ⚠️ Replace with a strong, random secret key
+app.secret_key = "jpl_secret_here"
 app.config.update(
-    SESSION_COOKIE_SAMESITE = "Lax",
-    SESSION_COOKIE_SECURE = False,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=False,
     SESSION_COOKIE_HTTPONLY=True
 )
 
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', 'http://localhost:3000')
-    response.headers.add('Access-Control-Allow-Credentials', 'true')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    return response
-CORS(app, supports_credentials=True, resources={r"/*": {"origins": "http://localhost:3000"}})  # Enable cookies for session auth
-socketio = SocketIO(app, cors_allowed_origins="http://localhost:3000", async_mode="eventlet",manage_session=False)
+# ---- CORS setup ----
+CORS(app, supports_credentials=True, resources={r"/*": {"origins": "http://localhost:3000"}})
 
+# ---- Socket setup ----
+socketio = SocketIO(app, cors_allowed_origins="http://localhost:3000", async_mode="eventlet", manage_session=False)
+
+# ---- Auction timer globals ----
 auction_timer = {
     "end_time": None,
     "active": False,
@@ -53,6 +48,7 @@ auction_timer = {
 }
 timer_thread = None
 thread_lock = threading.Lock()
+
 
 def background_timer():
     global auction_timer
@@ -63,7 +59,7 @@ def background_timer():
             if remaining <= 0:
                 remaining = 0
                 auction_timer['active'] = False
-                socketio.emit("auction ended", {"message" : "Auction ended"}, broadcast=True)
+                socketio.emit("auction ended", {"message" : "Auction ended"}, to=None)
             auction_timer["remaining_seconds"] = int(remaining)
             socketio.emit("timer_update", int(remaining), broadcast= True)
         socketio.sleep(1)
@@ -82,7 +78,7 @@ def pause_auction():
         auction_timer["remaining_seconds"] = max(0, int((auction_timer["end_time"] - now).total_seconds()))
     auction_timer["paused"] = True
 
-    socketio.emit("auction_paused", {"remaining": auction_timer["remaining_seconds"]}, broadcast=True)
+    socketio.emit("auction_paused", {"remaining": auction_timer["remaining_seconds"]}, to=None)
     return jsonify({"message": "Auction paused", "remaining": auction_timer["remaining_seconds"]}), 200
 
 
@@ -98,7 +94,7 @@ def resume_auction():
     auction_timer["end_time"] = datetime.now(timezone.utc) + timedelta(seconds=auction_timer["remaining_seconds"])
     auction_timer["paused"] = False
 
-    socketio.emit("auction_resumed", {"remaining": auction_timer["remaining_seconds"]}, broadcast=True)
+    socketio.emit("auction_resumed", {"remaining": auction_timer["remaining_seconds"]}, to=None)
     return jsonify({"message": "Auction resumed"}), 200
 
 
@@ -228,7 +224,7 @@ def handle_place_bid(data):
 
         # Broadcast updated auction state
         broadcast_auction_update()
-        emit("bid_placed", {"status": "ok", "team_id": team_id, "bid_amount": bid_amount}, broadcast=True)
+        emit("bid_placed", {"status": "ok", "team_id": team_id, "bid_amount": bid_amount}, to=None)
     except Exception as e:
         conn.rollback()
         emit("error", {"error": str(e)})
@@ -255,7 +251,7 @@ def handle_start_auction(data):
         broadcast_auction_update()
 
         socketio.start_background_task(auto_end_auction, player_id, expires_at)
-        emit("auction_started", {"player_id": player_id, "expires_at": expires_at.isoformat}, broadcast=True)
+        emit("auction_started", {"player_id": player_id, "expires_at": expires_at.isoformat}, to=None)
     finally:
         cursor.close(); conn.close()
 
@@ -269,7 +265,7 @@ def auto_end_auction(player_id, expires_at):
         active = cursor.fetchone()
         if active:
             broadcast_auction_update()
-            socketio.emit("auction_ended", {"player_id": player_id}, broadcast=True)
+            socketio.emit("auction_ended", {"player_id": player_id}, to=None)
         cursor.close()
         conn.close()
 
@@ -321,7 +317,7 @@ def handle_end_auction(data):
     # re-use your end-auction logic (decide winning bid, update sold_players)
     # After concluding:
     broadcast_auction_update()
-    emit("auction_ended", {"message": "Auction ended"}, broadcast=True)
+    emit("auction_ended", {"message": "Auction ended"}, to=None)
 
 @app.route('/cancel-auction', methods=['POST'])
 def cancel_auction():
@@ -354,7 +350,7 @@ def cancel_auction():
         socketio.emit("auction_cancelled", {
             "message": "Auction cancelled",
             "player_id": player_id
-        }, broadcast=True)
+        }, to=None)
 
         return jsonify({"message": "Auction cancelled", "player_id": player_id}), 200
 
@@ -1201,7 +1197,7 @@ def start_auction():
         # 🧵 Start background timer if not already running
         global timer_thread
         with thread_lock:
-            if timer_thread is None or not timer_thread.is_alive():
+            if not timer_thread or not getattr(timer_thread, 'running', lambda: False)():
                 timer_thread = socketio.start_background_task(background_timer)
 
         # 📢 Notify all clients
@@ -1210,7 +1206,7 @@ def start_auction():
             "player_name": player['name'],
             "mode": mode,
             "duration": auction_duration
-        }, broadcast=True)
+        }, to=None)
 
         return jsonify({
             "message": f"Auction started for {player['name']} in {mode} mode",
@@ -1289,12 +1285,16 @@ def get_current_auction():
                 "message": "No auction currently active"
             }), 200
 
-        # ✅ Calculate remaining time
+        # ✅ Calculate remaining time safely
         now = datetime.now(timezone.utc)
         expires_at = auction.get('expires_at')
 
         if isinstance(expires_at, str):
             expires_at = datetime.fromisoformat(expires_at)
+
+        if expires_at and expires_at.tzinfo is None:
+            # make timezone-aware
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
 
         remaining = 0
         if expires_at:
@@ -1315,7 +1315,7 @@ def get_current_auction():
             "current_bid": 0,
             "remaining_seconds": remaining,
             "auction_duration": auction["auction_duration"],
-            "history": []  # placeholder until we attach bid history
+            "history": []
         }), 200
 
     except Exception as e:
@@ -1402,7 +1402,7 @@ def next_auction():
         # 🧵 Restart background timer
         global timer_thread
         with thread_lock:
-            if timer_thread is None or not timer_thread.is_alive():
+            if not timer_thread or not getattr(timer_thread, 'running', lambda: False)():
                 timer_thread = socketio.start_background_task(background_timer)
 
         # 📢 Notify all connected clients
@@ -1411,7 +1411,7 @@ def next_auction():
             "player_name": next_player["name"],
             "mode": mode,
             "duration": auction_duration
-        }, broadcast=True)
+        }, to=None)
 
         return jsonify({
             "message": f"Moved to next player ({next_player['name']}) in {mode} mode",
@@ -1487,7 +1487,7 @@ def end_auction():
                 "message": "Auction forcefully cleared",
                 "player_id": player_id,
                 "status": "unsold"
-            }, broadcast=True)
+            }, to=None)
             return jsonify({"message": "Auction cleared", "player": player, "status": "unsold"}), 200
 
         # ⚙️ Case 2: Admin directly assigns a team
@@ -1558,7 +1558,7 @@ def end_auction():
             "team_name": team_name,
             "sold_price": float(sold_price) if status == "sold" else None,
             "status": status
-        }, broadcast=True)
+        }, to=None)
 
         return jsonify({
             "message": message,
