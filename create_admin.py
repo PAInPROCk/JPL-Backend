@@ -11,7 +11,7 @@ db = mysql.connector.connect(
 cursor = db.cursor()
 
 # Step 2: Admin credentials
-email = "admin1@example.com"       # change if you want
+email = "team@example.com"       # change if you want
 plain_password = "12345"           # change if you want
 role = "team"
 

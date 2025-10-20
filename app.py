@@ -17,6 +17,11 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_cors import CORS, cross_origin
 from werkzeug.utils import secure_filename
 
+# Global variable to track pause/resume status
+auction_status = {"paused": False}
+
+
+
 # ---- Flask setup ----
 base_dir = os.path.abspath(os.path.dirname(__file__))
 UPLOAD_FOLDER_PLAYERS = os.path.join(base_dir, 'uploads', 'players')
@@ -1262,6 +1267,48 @@ def start_auction():
     finally:
         cursor.close()
         conn.close()
+
+# ==========================
+# 🔹 PAUSE / RESUME AUCTION
+# ==========================
+@app.route('/pause-auction', methods=['POST'])
+def pause_auction():
+    # ✅ Only admin can pause
+    if 'user' not in session:
+        return jsonify({'error': 'Unauthorized', 'status': 'error'}), 401
+    if session['user'].get('role') != 'admin':
+        return jsonify({'error': 'Forbidden', 'status': 'error'}), 403
+
+    auction_status['paused'] = True
+    return jsonify({
+        'message': 'Auction paused successfully',
+        'status': 'paused'
+    }), 200
+
+
+@app.route('/resume-auction', methods=['POST'])
+def resume_auction():
+    # ✅ Only admin can resume
+    if 'user' not in session:
+        return jsonify({'error': 'Unauthorized', 'status': 'error'}), 401
+    if session['user'].get('role') != 'admin':
+        return jsonify({'error': 'Forbidden', 'status': 'error'}), 403
+
+    auction_status['paused'] = False
+    return jsonify({
+        'message': 'Auction resumed successfully',
+        'status': 'running'
+    }), 200
+
+
+@app.route('/auction-status', methods=['GET'])
+def get_auction_status():
+    """Used by frontend to check if auction is paused or active"""
+    return jsonify({
+        'paused': auction_status['paused'],
+        'status': 'paused' if auction_status['paused'] else 'running'
+    }), 200
+
 
 @app.route('/auction-time', methods=['GET'])
 def get_timer():
