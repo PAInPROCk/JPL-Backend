@@ -34,10 +34,16 @@ app.config.update(
 )
 
 # ---- CORS setup ----
-CORS(app, supports_credentials=True, resources={r"/*": {"origins": "http://localhost:3000"}})
+CORS(app, supports_credentials=True, origins=["http://localhost:3000"])
 
 # ---- Socket setup ----
-socketio = SocketIO(app, cors_allowed_origins="http://localhost:3000", async_mode="eventlet", manage_session=False)
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=["http://localhost:3000"],
+    async_mode="eventlet",
+    manage_session=False
+)
+
 
 # ---- Auction timer globals ----
 auction_timer = {
@@ -171,13 +177,17 @@ def on_connect():
         pass
     emit("connected", {"msg": "Connected to JPL socket", "user": user})
 
-@socketio.on("join_auction")
+@socketio.on('join_auction')
 def handle_join_auction(data):
-    # optional: join a room per auction id
+    team_id = data.get('team_id')
+    team_name = data.get('team_name')
+    purse = data.get('purse')
+    
+    sid = request.sid
+    print(f"✅ Team {team_name} (ID: {team_id}) joined auction with purse ₹{purse}")
     join_room("auction_room")
-    # send current state
-    current = fetch_current_auction()
-    emit("joined", {"current_auction": current}, room=request.sid)
+
+    emit("joined_auction", {"message": f"{team_name} joined successfully"}, room="auction_room")
 
 @socketio.on("place_bid")
 def handle_place_bid(data):
@@ -427,8 +437,10 @@ def login():
         session['user'] = {
             'id': user['id'],
             'email': user['email'],
-            'role': user['role']
+            'role': user['role'],
+            'team_id': user.get('team_id')
         }
+
         return jsonify({
             "message": "Login successful",
             "user": session['user'],
@@ -444,14 +456,34 @@ def login():
 def check_auth():
     print("DEBUG SESSION:", session)
     user = session.get('user')
-    if 'user' in session:
-        return jsonify({
-            "authenticated": True,
-            "user": session['user'],
-            "role": user['role'] 
-        }), 200
-    else:
+    if not user:
         return jsonify({"authenticated": False}), 401
+
+    role = user.get('role')
+
+    # Extend response if team
+    extra = {}
+    if role == 'team':
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        try:
+            # ✅ Use team_id column instead of id
+            cursor.execute("SELECT team_id AS id, name, purse FROM teams WHERE team_id = %s", (user.get('team_id') or user.get('id'),))
+            team_data = cursor.fetchone()
+            if team_data:
+                extra["team_id"] = team_data["id"]
+                extra["team_name"] = team_data["name"]
+                extra["purse"] = team_data["purse"]
+        finally:
+            cursor.close()
+            conn.close()
+
+    print("SESSION USER:", session.get('user'))
+    return jsonify({
+        "authenticated": True,
+        "user": {**user, **extra},
+        "role": role
+    }), 200
 
 # ✅ Logout
 @app.route('/logout', methods=['POST'])
@@ -926,6 +958,39 @@ def get_players():
     conn.close()
     return jsonify(players)
 
+@app.route('/players-with-teams')
+def get_players_with_teams():
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT 
+            p.id AS player_id, 
+            p.name, 
+            p.nickname, 
+            p.jersey, 
+            p.category, 
+            p.type,
+            p.image_path, 
+            p.base_price, 
+            p.total_runs, 
+            p.highest_runs, 
+            p.wickets_taken, 
+            p.times_out, 
+            GROUP_CONCAT(t.name SEPARATOR ', ') AS teams_played
+        FROM players p
+        LEFT JOIN player_teams pt ON p.id = pt.player_id
+        LEFT JOIN teams t ON pt.team_id = t.team_id   -- ✅ FIXED HERE
+        GROUP BY p.id
+        ORDER BY p.name ASC
+    """)
+
+    players = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    return jsonify(players)
+
 @app.route('/add-player', methods=['POST'])
 def add_player():
     if 'user' not in session:
@@ -934,8 +999,10 @@ def add_player():
     if session['user']['role'] != 'admin':
         return jsonify({'error': 'Forbidden'}), 403
 
-    # Extract data from form
-    name = request.form.get('playerName')
+    # Extract form data
+    first_name = request.form.get('playerName', '').strip()
+    father_name = request.form.get('fatherName', '').strip()
+    sur_name = request.form.get('surName', '').strip()
     nickname = request.form.get('nickName')
     age = request.form.get('age')
     category = request.form.get('category')
@@ -945,12 +1012,19 @@ def add_player():
     highest_runs = request.form.get('highestRuns', 0)
     wickets_taken = request.form.get('wickets', 0)
     times_out = request.form.get('outs', 0)
-    teams_played = ",".join(request.form.getlist('teams[]'))
     jersey_number = request.form.get('jerseyNo')
     mobile_no = request.form.get('mobile')
     email = request.form.get('emailId')
 
-    # Handle the image
+    # ✅ Combine names safely
+    full_name = " ".join(
+        part for part in [first_name, father_name, sur_name] if part
+    ).strip()
+
+    # ✅ Teams (IDs from frontend)
+    team_ids = request.form.getlist('teams[]')
+
+    # ✅ Handle image
     image_file = request.files.get('image')
     image_path = None
     if image_file and '.' in image_file.filename:
@@ -961,31 +1035,46 @@ def add_player():
             image_file.save(filepath)
             image_path = f'uploads/players/{filename}'
 
-    if not name:
-        return jsonify({"error": "Player name is required"}), 400
+    if not full_name:
+        return jsonify({"error": "Player full name is required"}), 400
 
     conn = get_db_connection()
     cursor = conn.cursor()
+
     try:
+        # ✅ Insert into players table
         cursor.execute("""
             INSERT INTO players 
             (name, nickname, age, category, type, base_price, total_runs, highest_runs, 
-             wickets_taken, times_out, teams_played, image_path, jersey, mobile_No, email_Id) 
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             wickets_taken, times_out, image_path, jersey, mobile_No, email_Id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            name, nickname, age, category, type_, base_price, total_runs, highest_runs,
-            wickets_taken, times_out, teams_played, image_path, jersey_number, mobile_no, email
+            full_name, nickname, age, category, type_, base_price, total_runs, highest_runs,
+            wickets_taken, times_out, image_path, jersey_number, mobile_no, email
         ))
+
+        player_id = cursor.lastrowid
+
+        # ✅ Insert player-team relationships
+        for team_id in team_ids:
+            cursor.execute(
+                "INSERT INTO player_teams (player_id, team_id) VALUES (%s, %s)",
+                (player_id, team_id)
+            )
+
         conn.commit()
-        return jsonify({"message": "Player added successfully!"}), 201
+        return jsonify({"message": "Player added successfully!", "player_id": player_id}), 201
 
     except mysql.connector.IntegrityError:
+        conn.rollback()
         return jsonify({"error": "Player with same name or jersey number exists"}), 400
     except mysql.connector.Error as err:
+        conn.rollback()
         return jsonify({"error": str(err)}), 500
     finally:
         cursor.close()
         conn.close()
+
 
 
 # ✅ Upload players via CSV
@@ -1263,6 +1352,20 @@ def start_auction():
         cursor.close()
         conn.close()
 
+@app.route("/auction-status")
+def auction_status():
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM current_auction LIMIT 1")
+    auction = cursor.fetchone()
+    cursor.close()
+    conn.close()
+
+    if auction:
+        return jsonify({"active": True, "player": auction})
+    else:
+        return jsonify({"active": False})
+
 @app.route('/auction-time', methods=['GET'])
 def get_timer():
     conn = get_db_connection
@@ -1292,15 +1395,15 @@ def get_timer():
 # ✅ Get current auction player
 @app.route('/current-auction', methods=['GET'])
 def get_current_auction():
-    # 🔐 Authentication check
     if 'user' not in session:
         return jsonify({"error": "Unauthorized"}), 401
 
+    user = session['user']
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        # ✅ Join player info
+        # ✅ Get current auction + player details
         cursor.execute("""
             SELECT 
                 ca.player_id, 
@@ -1321,22 +1424,40 @@ def get_current_auction():
                 "message": "No auction currently active"
             }), 200
 
-        # ✅ Calculate remaining time safely
+        # ✅ Calculate remaining time
         now = datetime.now(timezone.utc)
         expires_at = auction.get('expires_at')
-
         if isinstance(expires_at, str):
             expires_at = datetime.fromisoformat(expires_at)
-
         if expires_at and expires_at.tzinfo is None:
-            # make timezone-aware
             expires_at = expires_at.replace(tzinfo=timezone.utc)
+        remaining = max(0, int((expires_at - now).total_seconds())) if expires_at else 0
 
-        remaining = 0
-        if expires_at:
-            remaining = max(0, int((expires_at - now).total_seconds()))
+        # ✅ Get current highest bid (optional)
+        cursor.execute("""
+        SELECT b.team_id, t.name AS team_name, b.bid_amount AS bid_amount
+        FROM bids b
+        JOIN teams t ON b.team_id = t.team_id
+        WHERE b.player_id = %s
+        ORDER BY b.bid_amount DESC
+        LIMIT 1
+        """, (auction['player_id'],))
 
-        # ✅ Return auction data
+
+        top_bid = cursor.fetchone()
+        current_bid = top_bid['bid_amount'] if top_bid else auction['base_price']
+
+        # ✅ Get current team’s purse (for team users)
+        team_balance = 0
+        if user.get('role') == 'team':
+            cursor.execute("SELECT purse FROM teams WHERE id = %s", (user.get('team_id'),))
+            team = cursor.fetchone()
+            if team:
+                team_balance = team['purse']
+
+        # ✅ Define next bidding steps (you can adjust increment logic)
+        next_steps = [current_bid + 500, current_bid + 1000, current_bid + 1500]
+
         return jsonify({
             "status": "auction_active",
             "player": {
@@ -1346,12 +1467,15 @@ def get_current_auction():
                 "category": auction["category"],
                 "type": auction["type"],
                 "image_path": auction["image_path"],
-                "base_price": auction["base_price"],
+                "base_price": auction["base_price"]
             },
-            "current_bid": 0,
+            "currentBid": current_bid,
             "remaining_seconds": remaining,
             "auction_duration": auction["auction_duration"],
-            "history": []
+            "teamBalance": team_balance,
+            "nextSteps": next_steps,
+            "canBid": user.get("role") == "team",  # only teams can bid
+            "history": []  # can be populated later
         }), 200
 
     except Exception as e:
