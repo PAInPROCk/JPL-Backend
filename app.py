@@ -59,44 +59,57 @@ thread_lock = threading.Lock()
 
 def background_timer():
     global auction_timer
-    while auction_timer['active']:
-        if auction_timer['end_time'] and not auction_timer['paused']:
+    while auction_timer["active"]:
+        if auction_timer["end_time"] and not auction_timer["paused"]:
             now = datetime.now(timezone.utc)
-            remaining = (auction_timer['end_time'] - now).total_seconds()
+            remaining = (auction_timer["end_time"] - now).total_seconds()
+
             if remaining <= 0:
                 remaining = 0
-                auction_timer['active'] = False
+                auction_timer["active"] = False
+                auction_timer["remaining_seconds"] = 0
+                socketio.emit("timer_update", 0, to=None)
 
-                # ✅ Broadcast final timer update
-                socketio.emit("timer_update", 0, broadcast=True)
+                # ✅ Move player to unsold table safely
+                try:
+                    conn = get_db_connection()
+                    cursor = conn.cursor(dictionary=True)
 
-                # ✅ Move player to unsold list
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO unsold_players (player_id, reason, timestamp)
-                    SELECT player_id, 'No bids placed', NOW()
-                    FROM current_auction
-                    LIMIT 1
-                """)
-                conn.commit()
-                cursor.close()
-                conn.close()
+                    cursor.execute("SELECT player_id FROM current_auction LIMIT 1")
+                    current = cursor.fetchone()
 
-                # ✅ Notify all users that auction ended
-                socketio.emit("auction_ended", {
-                    "status": "unsold",
-                    "message": "No bids were placed. Player moved to Unsold list."
-                }, broadcast=True)
+                    if current and "player_id" in current:
+                        player_id = current["player_id"]
+
+                        cursor.execute("""
+                            INSERT INTO unsold_players (player_id, reason, auction_round, added_on)
+                            VALUES (%s, %s, %s, NOW())
+                        """, (player_id, "No bids placed", 1))
+                        conn.commit()
+
+                        socketio.emit("auction_ended", {
+                            "status": "unsold",
+                            "message": "No bids were placed. Player moved to Unsold list.",
+                            "player_id": player_id
+                        }, to=None)
+                        print(f"✅ Player {player_id} moved to unsold_players table.")
+
+                    else:
+                        print("⚠️ No player found in current_auction — skipping insert.")
+
+                    cursor.close()
+                    conn.close()
+
+                except Exception as e:
+                    print(f"❌ Timer thread error: {e}")
 
                 break
 
             auction_timer["remaining_seconds"] = int(remaining)
-
-            # ✅ Send timer updates to ALL connected clients (admin + teams)
-            socketio.emit("timer_update", int(remaining), broadcast=True)
+            socketio.emit("timer_update", int(remaining), to=None)
 
         socketio.sleep(1)
+
 
 
 @app.route('/pause-auction', methods=['POST'])
