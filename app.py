@@ -17,6 +17,7 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_cors import CORS, cross_origin
 from werkzeug.utils import secure_filename
 
+auction_status = {"paused": False}
 # ---- Flask setup ----
 base_dir = os.path.abspath(os.path.dirname(__file__))
 UPLOAD_FOLDER_PLAYERS = os.path.join(base_dir, 'uploads', 'players')
@@ -65,8 +66,11 @@ def background_timer():
             if remaining <= 0:
                 remaining = 0
                 auction_timer['active'] = False
-                socketio.emit("timer_update", 0, to=None)
 
+                # ✅ Broadcast final timer update
+                socketio.emit("timer_update", 0, broadcast=True)
+
+                # ✅ Move player to unsold list
                 conn = get_db_connection()
                 cursor = conn.cursor()
                 cursor.execute("""
@@ -79,16 +83,21 @@ def background_timer():
                 cursor.close()
                 conn.close()
 
-                socketio.emit("auction_ended",{
-                    "status" : "unsold",
-                    "message" : "No bids were placed. Player moved to Unsold list."
-                }, to=None)
+                # ✅ Notify all users that auction ended
+                socketio.emit("auction_ended", {
+                    "status": "unsold",
+                    "message": "No bids were placed. Player moved to Unsold list."
+                }, broadcast=True)
 
                 break
 
             auction_timer["remaining_seconds"] = int(remaining)
-            socketio.emit("timer_update", int(remaining), to= None)
+
+            # ✅ Send timer updates to ALL connected clients (admin + teams)
+            socketio.emit("timer_update", int(remaining), broadcast=True)
+
         socketio.sleep(1)
+
 
 @app.route('/pause-auction', methods=['POST'])
 def pause_auction():
@@ -1450,7 +1459,7 @@ def get_current_auction():
         # ✅ Get current team’s purse (for team users)
         team_balance = 0
         if user.get('role') == 'team':
-            cursor.execute("SELECT purse FROM teams WHERE id = %s", (user.get('team_id'),))
+            cursor.execute("SELECT purse FROM teams WHERE team_id = %s", (user.get('team_id'),))
             team = cursor.fetchone()
             if team:
                 team_balance = team['purse']
