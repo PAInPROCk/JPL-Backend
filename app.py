@@ -17,6 +17,11 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_cors import CORS, cross_origin
 from werkzeug.utils import secure_filename
 
+# Global variable to track pause/resume status
+auction_status = {"paused": False}
+
+
+
 # ---- Flask setup ----
 base_dir = os.path.abspath(os.path.dirname(__file__))
 UPLOAD_FOLDER_PLAYERS = os.path.join(base_dir, 'uploads', 'players')
