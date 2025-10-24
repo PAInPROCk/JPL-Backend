@@ -16,12 +16,28 @@ from flask import Flask, jsonify, request, session, send_from_directory
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_cors import CORS, cross_origin
 from werkzeug.utils import secure_filename
+from decimal import Decimal
 
+<<<<<<< HEAD
 # Global variable to track pause/resume status
 auction_status = {"paused": False}
 
 
 
+=======
+def safe_json(obj):
+    """Recursively convert Decimals to float for JSON serialization."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    elif isinstance(obj, dict):
+        return {k: safe_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [safe_json(i) for i in obj]
+    return obj
+
+
+auction_status = {"paused": False}
+>>>>>>> 3dc23331b9d3b1ad9631f8a006617dc4863fca9f
 # ---- Flask setup ----
 base_dir = os.path.abspath(os.path.dirname(__file__))
 UPLOAD_FOLDER_PLAYERS = os.path.join(base_dir, 'uploads', 'players')
@@ -39,10 +55,16 @@ app.config.update(
 )
 
 # ---- CORS setup ----
-CORS(app, supports_credentials=True, resources={r"/*": {"origins": "http://localhost:3000"}})
+CORS(app, supports_credentials=True, origins=["http://localhost:3000"])
 
 # ---- Socket setup ----
-socketio = SocketIO(app, cors_allowed_origins="http://localhost:3000", async_mode="eventlet", manage_session=False)
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=["http://localhost:3000"],
+    async_mode="eventlet",
+    manage_session=False
+)
+
 
 # ---- Auction timer globals ----
 auction_timer = {
@@ -57,37 +79,71 @@ thread_lock = threading.Lock()
 
 def background_timer():
     global auction_timer
-    while auction_timer['active']:
-        if auction_timer['end_time'] and not auction_timer['paused']:
+    while auction_timer["active"]:
+        if auction_timer["end_time"] and not auction_timer["paused"]:
             now = datetime.now(timezone.utc)
-            remaining = (auction_timer['end_time'] - now).total_seconds()
+            remaining = (auction_timer["end_time"] - now).total_seconds()
+
             if remaining <= 0:
                 remaining = 0
-                auction_timer['active'] = False
+                auction_timer["active"] = False
+                auction_timer["remaining_seconds"] = 0
                 socketio.emit("timer_update", 0, to=None)
 
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO unsold_players (player_id, reason, timestamp)
-                    SELECT player_id, 'No bids placed', NOW()
-                    FROM current_auction
-                    LIMIT 1
-                """)
-                conn.commit()
-                cursor.close()
-                conn.close()
+                # ✅ Move player to unsold table safely
+                try:
+                    conn = get_db_connection()
+                    cursor = conn.cursor(dictionary=True)
 
-                socketio.emit("auction_ended",{
-                    "status" : "unsold",
-                    "message" : "No bids were placed. Player moved to Unsold list."
-                }, to=None)
+                    cursor.execute("SELECT player_id FROM current_auction LIMIT 1")
+                    current = cursor.fetchone()
+
+                    if current and "player_id" in current:
+                        player_id = current["player_id"]
+
+                        cursor.execute("""
+                            INSERT INTO unsold_players (player_id, reason, auction_round, added_on)
+                            VALUES (%s, %s, %s, NOW())
+                        """, (player_id, "No bids placed", 1))
+                        conn.commit()
+
+                        # ✅ Remove player from current_auction table after moving to unsold
+                        cursor.execute("DELETE FROM current_auction WHERE player_id = %s", (player_id,))
+                        conn.commit()
+                        print(f"🗑️ Player {player_id} removed from current_auction after being marked UNSOLD")
+
+                        
+                        cursor.execute("""
+                            SELECT p.id, p.name, p.image_path, p.base_price
+                            FROM players p
+                            WHERE p.id = %s
+                        """, (player_id,))
+                        player_data = cursor.fetchone()
+
+                        socketio.emit("auction_ended", safe_json({
+                            "status": "unsold",
+                            "message": "No bids were placed. Player moved to Unsold list.",
+                            "player": player_data
+                        }), to=None)
+                        print(f"✅ Player {player_id} moved to unsold_players table.")
+
+                    else:
+                        print("⚠️ No player found in current_auction — skipping insert.")
+
+                    cursor.close()
+                    conn.close()
+
+                except Exception as e:
+                    print(f"❌ Timer thread error: {e}")
 
                 break
 
             auction_timer["remaining_seconds"] = int(remaining)
-            socketio.emit("timer_update", int(remaining), to= None)
+            socketio.emit("timer_update", int(remaining), to=None)
+
         socketio.sleep(1)
+
+
 
 @app.route('/pause-auction', methods=['POST'])
 def pause_auction():
@@ -176,13 +232,17 @@ def on_connect():
         pass
     emit("connected", {"msg": "Connected to JPL socket", "user": user})
 
-@socketio.on("join_auction")
+@socketio.on('join_auction')
 def handle_join_auction(data):
-    # optional: join a room per auction id
+    team_id = data.get('team_id')
+    team_name = data.get('team_name')
+    purse = data.get('purse')
+    
+    sid = request.sid
+    print(f"✅ Team {team_name} (ID: {team_id}) joined auction with purse ₹{purse}")
     join_room("auction_room")
-    # send current state
-    current = fetch_current_auction()
-    emit("joined", {"current_auction": current}, room=request.sid)
+
+    emit("joined_auction", {"message": f"{team_name} joined successfully"}, room="auction_room")
 
 @socketio.on("place_bid")
 def handle_place_bid(data):
@@ -432,8 +492,10 @@ def login():
         session['user'] = {
             'id': user['id'],
             'email': user['email'],
-            'role': user['role']
+            'role': user['role'],
+            'team_id': user.get('team_id')
         }
+
         return jsonify({
             "message": "Login successful",
             "user": session['user'],
@@ -449,14 +511,34 @@ def login():
 def check_auth():
     print("DEBUG SESSION:", session)
     user = session.get('user')
-    if 'user' in session:
-        return jsonify({
-            "authenticated": True,
-            "user": session['user'],
-            "role": user['role'] 
-        }), 200
-    else:
+    if not user:
         return jsonify({"authenticated": False}), 401
+
+    role = user.get('role')
+
+    # Extend response if team
+    extra = {}
+    if role == 'team':
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        try:
+            # ✅ Use team_id column instead of id
+            cursor.execute("SELECT team_id AS id, name, purse FROM teams WHERE team_id = %s", (user.get('team_id') or user.get('id'),))
+            team_data = cursor.fetchone()
+            if team_data:
+                extra["team_id"] = team_data["id"]
+                extra["team_name"] = team_data["name"]
+                extra["purse"] = team_data["purse"]
+        finally:
+            cursor.close()
+            conn.close()
+
+    print("SESSION USER:", session.get('user'))
+    return jsonify({
+        "authenticated": True,
+        "user": {**user, **extra},
+        "role": role
+    }), 200
 
 # ✅ Logout
 @app.route('/logout', methods=['POST'])
@@ -931,6 +1013,39 @@ def get_players():
     conn.close()
     return jsonify(players)
 
+@app.route('/players-with-teams')
+def get_players_with_teams():
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT 
+            p.id AS player_id, 
+            p.name, 
+            p.nickname, 
+            p.jersey, 
+            p.category, 
+            p.type,
+            p.image_path, 
+            p.base_price, 
+            p.total_runs, 
+            p.highest_runs, 
+            p.wickets_taken, 
+            p.times_out, 
+            GROUP_CONCAT(t.name SEPARATOR ', ') AS teams_played
+        FROM players p
+        LEFT JOIN player_teams pt ON p.id = pt.player_id
+        LEFT JOIN teams t ON pt.team_id = t.team_id   -- ✅ FIXED HERE
+        GROUP BY p.id
+        ORDER BY p.name ASC
+    """)
+
+    players = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    return jsonify(players)
+
 @app.route('/add-player', methods=['POST'])
 def add_player():
     if 'user' not in session:
@@ -939,8 +1054,10 @@ def add_player():
     if session['user']['role'] != 'admin':
         return jsonify({'error': 'Forbidden'}), 403
 
-    # Extract data from form
-    name = request.form.get('playerName')
+    # Extract form data
+    first_name = request.form.get('playerName', '').strip()
+    father_name = request.form.get('fatherName', '').strip()
+    sur_name = request.form.get('surName', '').strip()
     nickname = request.form.get('nickName')
     age = request.form.get('age')
     category = request.form.get('category')
@@ -950,12 +1067,19 @@ def add_player():
     highest_runs = request.form.get('highestRuns', 0)
     wickets_taken = request.form.get('wickets', 0)
     times_out = request.form.get('outs', 0)
-    teams_played = ",".join(request.form.getlist('teams[]'))
     jersey_number = request.form.get('jerseyNo')
     mobile_no = request.form.get('mobile')
     email = request.form.get('emailId')
 
-    # Handle the image
+    # ✅ Combine names safely
+    full_name = " ".join(
+        part for part in [first_name, father_name, sur_name] if part
+    ).strip()
+
+    # ✅ Teams (IDs from frontend)
+    team_ids = request.form.getlist('teams[]')
+
+    # ✅ Handle image
     image_file = request.files.get('image')
     image_path = None
     if image_file and '.' in image_file.filename:
@@ -966,31 +1090,46 @@ def add_player():
             image_file.save(filepath)
             image_path = f'uploads/players/{filename}'
 
-    if not name:
-        return jsonify({"error": "Player name is required"}), 400
+    if not full_name:
+        return jsonify({"error": "Player full name is required"}), 400
 
     conn = get_db_connection()
     cursor = conn.cursor()
+
     try:
+        # ✅ Insert into players table
         cursor.execute("""
             INSERT INTO players 
             (name, nickname, age, category, type, base_price, total_runs, highest_runs, 
-             wickets_taken, times_out, teams_played, image_path, jersey, mobile_No, email_Id) 
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             wickets_taken, times_out, image_path, jersey, mobile_No, email_Id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            name, nickname, age, category, type_, base_price, total_runs, highest_runs,
-            wickets_taken, times_out, teams_played, image_path, jersey_number, mobile_no, email
+            full_name, nickname, age, category, type_, base_price, total_runs, highest_runs,
+            wickets_taken, times_out, image_path, jersey_number, mobile_no, email
         ))
+
+        player_id = cursor.lastrowid
+
+        # ✅ Insert player-team relationships
+        for team_id in team_ids:
+            cursor.execute(
+                "INSERT INTO player_teams (player_id, team_id) VALUES (%s, %s)",
+                (player_id, team_id)
+            )
+
         conn.commit()
-        return jsonify({"message": "Player added successfully!"}), 201
+        return jsonify({"message": "Player added successfully!", "player_id": player_id}), 201
 
     except mysql.connector.IntegrityError:
+        conn.rollback()
         return jsonify({"error": "Player with same name or jersey number exists"}), 400
     except mysql.connector.Error as err:
+        conn.rollback()
         return jsonify({"error": str(err)}), 500
     finally:
         cursor.close()
         conn.close()
+
 
 
 # ✅ Upload players via CSV
@@ -1268,6 +1407,20 @@ def start_auction():
         cursor.close()
         conn.close()
 
+@app.route("/auction-status")
+def auction_status():
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM current_auction LIMIT 1")
+    auction = cursor.fetchone()
+    cursor.close()
+    conn.close()
+
+    if auction:
+        return jsonify({"active": True, "player": auction})
+    else:
+        return jsonify({"active": False})
+
 @app.route('/auction-time', methods=['GET'])
 def get_timer():
     conn = get_db_connection
@@ -1297,15 +1450,16 @@ def get_timer():
 # ✅ Get current auction player
 @app.route('/current-auction', methods=['GET'])
 def get_current_auction():
-    # 🔐 Authentication check
+    # ✅ Step 1: Session check
     if 'user' not in session:
         return jsonify({"error": "Unauthorized"}), 401
 
+    user = session['user']
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        # ✅ Join player info
+        # ✅ Step 2: Get current auction + player details
         cursor.execute("""
             SELECT 
                 ca.player_id, 
@@ -1326,22 +1480,47 @@ def get_current_auction():
                 "message": "No auction currently active"
             }), 200
 
-        # ✅ Calculate remaining time safely
+        # ✅ Step 3: Calculate remaining time
         now = datetime.now(timezone.utc)
         expires_at = auction.get('expires_at')
-
         if isinstance(expires_at, str):
             expires_at = datetime.fromisoformat(expires_at)
-
         if expires_at and expires_at.tzinfo is None:
-            # make timezone-aware
             expires_at = expires_at.replace(tzinfo=timezone.utc)
+        remaining = max(0, int((expires_at - now).total_seconds())) if expires_at else 0
 
-        remaining = 0
-        if expires_at:
-            remaining = max(0, int((expires_at - now).total_seconds()))
+        # ✅ Step 4: Get highest bid if exists
+        cursor.execute("""
+            SELECT b.team_id, t.name AS team_name, b.bid_amount
+            FROM bids b
+            JOIN teams t ON b.team_id = t.team_id
+            WHERE b.player_id = %s
+            ORDER BY b.bid_amount DESC
+            LIMIT 1
+        """, (auction['player_id'],))
+        top_bid = cursor.fetchone()
 
-        # ✅ Return auction data
+        # ✅ Step 5: Safely handle base price & current bid
+        base_price = auction.get('base_price') or 0
+        if isinstance(base_price, Decimal):
+            base_price = float(base_price)
+
+        current_bid = top_bid['bid_amount'] if top_bid else base_price
+        if isinstance(current_bid, Decimal):
+            current_bid = float(current_bid)
+
+        # ✅ Step 6: Initialize team balance for both admin/team users
+        team_balance = 0.0
+        if user.get('role') == 'team':
+            cursor.execute("SELECT purse FROM teams WHERE team_id = %s", (user.get('team_id'),))
+            team = cursor.fetchone()
+            if team and team.get('purse') is not None:
+                team_balance = float(team['purse'])
+
+        # ✅ Step 7: Define next bid increments safely
+        next_steps = [current_bid + 500, current_bid + 1000, current_bid + 1500]
+
+        # ✅ Step 8: Build the final JSON response
         return jsonify({
             "status": "auction_active",
             "player": {
@@ -1351,12 +1530,15 @@ def get_current_auction():
                 "category": auction["category"],
                 "type": auction["type"],
                 "image_path": auction["image_path"],
-                "base_price": auction["base_price"],
+                "base_price": base_price
             },
-            "current_bid": 0,
+            "currentBid": current_bid,
             "remaining_seconds": remaining,
             "auction_duration": auction["auction_duration"],
-            "history": []
+            "teamBalance": team_balance,
+            "nextSteps": next_steps,
+            "canBid": user.get("role") == "team",
+            "history": []  # you can add bid history later if needed
         }), 200
 
     except Exception as e:
