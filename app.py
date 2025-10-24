@@ -16,6 +16,18 @@ from flask import Flask, jsonify, request, session, send_from_directory
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_cors import CORS, cross_origin
 from werkzeug.utils import secure_filename
+from decimal import Decimal
+
+def safe_json(obj):
+    """Recursively convert Decimals to float for JSON serialization."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    elif isinstance(obj, dict):
+        return {k: safe_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [safe_json(i) for i in obj]
+    return obj
+
 
 auction_status = {"paused": False}
 # ---- Flask setup ----
@@ -87,11 +99,24 @@ def background_timer():
                         """, (player_id, "No bids placed", 1))
                         conn.commit()
 
-                        socketio.emit("auction_ended", {
+                        # ✅ Remove player from current_auction table after moving to unsold
+                        cursor.execute("DELETE FROM current_auction WHERE player_id = %s", (player_id,))
+                        conn.commit()
+                        print(f"🗑️ Player {player_id} removed from current_auction after being marked UNSOLD")
+
+                        
+                        cursor.execute("""
+                            SELECT p.id, p.name, p.image_path, p.base_price
+                            FROM players p
+                            WHERE p.id = %s
+                        """, (player_id,))
+                        player_data = cursor.fetchone()
+
+                        socketio.emit("auction_ended", safe_json({
                             "status": "unsold",
                             "message": "No bids were placed. Player moved to Unsold list.",
-                            "player_id": player_id
-                        }, to=None)
+                            "player": player_data
+                        }), to=None)
                         print(f"✅ Player {player_id} moved to unsold_players table.")
 
                     else:
@@ -1417,6 +1442,7 @@ def get_timer():
 # ✅ Get current auction player
 @app.route('/current-auction', methods=['GET'])
 def get_current_auction():
+    # ✅ Step 1: Session check
     if 'user' not in session:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -1425,7 +1451,7 @@ def get_current_auction():
     cursor = conn.cursor(dictionary=True)
 
     try:
-        # ✅ Get current auction + player details
+        # ✅ Step 2: Get current auction + player details
         cursor.execute("""
             SELECT 
                 ca.player_id, 
@@ -1446,7 +1472,7 @@ def get_current_auction():
                 "message": "No auction currently active"
             }), 200
 
-        # ✅ Calculate remaining time
+        # ✅ Step 3: Calculate remaining time
         now = datetime.now(timezone.utc)
         expires_at = auction.get('expires_at')
         if isinstance(expires_at, str):
@@ -1455,31 +1481,38 @@ def get_current_auction():
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         remaining = max(0, int((expires_at - now).total_seconds())) if expires_at else 0
 
-        # ✅ Get current highest bid (optional)
+        # ✅ Step 4: Get highest bid if exists
         cursor.execute("""
-        SELECT b.team_id, t.name AS team_name, b.bid_amount AS bid_amount
-        FROM bids b
-        JOIN teams t ON b.team_id = t.team_id
-        WHERE b.player_id = %s
-        ORDER BY b.bid_amount DESC
-        LIMIT 1
+            SELECT b.team_id, t.name AS team_name, b.bid_amount
+            FROM bids b
+            JOIN teams t ON b.team_id = t.team_id
+            WHERE b.player_id = %s
+            ORDER BY b.bid_amount DESC
+            LIMIT 1
         """, (auction['player_id'],))
-
-
         top_bid = cursor.fetchone()
-        current_bid = top_bid['bid_amount'] if top_bid else auction['base_price']
 
-        # ✅ Get current team’s purse (for team users)
-        team_balance = 0
+        # ✅ Step 5: Safely handle base price & current bid
+        base_price = auction.get('base_price') or 0
+        if isinstance(base_price, Decimal):
+            base_price = float(base_price)
+
+        current_bid = top_bid['bid_amount'] if top_bid else base_price
+        if isinstance(current_bid, Decimal):
+            current_bid = float(current_bid)
+
+        # ✅ Step 6: Initialize team balance for both admin/team users
+        team_balance = 0.0
         if user.get('role') == 'team':
             cursor.execute("SELECT purse FROM teams WHERE team_id = %s", (user.get('team_id'),))
             team = cursor.fetchone()
-            if team:
-                team_balance = team['purse']
+            if team and team.get('purse') is not None:
+                team_balance = float(team['purse'])
 
-        # ✅ Define next bidding steps (you can adjust increment logic)
+        # ✅ Step 7: Define next bid increments safely
         next_steps = [current_bid + 500, current_bid + 1000, current_bid + 1500]
 
+        # ✅ Step 8: Build the final JSON response
         return jsonify({
             "status": "auction_active",
             "player": {
@@ -1489,15 +1522,15 @@ def get_current_auction():
                 "category": auction["category"],
                 "type": auction["type"],
                 "image_path": auction["image_path"],
-                "base_price": auction["base_price"]
+                "base_price": base_price
             },
             "currentBid": current_bid,
             "remaining_seconds": remaining,
             "auction_duration": auction["auction_duration"],
             "teamBalance": team_balance,
             "nextSteps": next_steps,
-            "canBid": user.get("role") == "team",  # only teams can bid
-            "history": []  # can be populated later
+            "canBid": user.get("role") == "team",
+            "history": []  # you can add bid history later if needed
         }), 200
 
     except Exception as e:
