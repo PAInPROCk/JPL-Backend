@@ -18,13 +18,8 @@ from flask_cors import CORS, cross_origin
 from werkzeug.utils import secure_filename
 from decimal import Decimal
 
-<<<<<<< HEAD
-# Global variable to track pause/resume status
-auction_status = {"paused": False}
 
 
-
-=======
 def safe_json(obj):
     """Recursively convert Decimals to float for JSON serialization."""
     if isinstance(obj, Decimal):
@@ -35,9 +30,9 @@ def safe_json(obj):
         return [safe_json(i) for i in obj]
     return obj
 
-
+# Global variable to track pause/resume status
 auction_status = {"paused": False}
->>>>>>> 3dc23331b9d3b1ad9631f8a006617dc4863fca9f
+
 # ---- Flask setup ----
 base_dir = os.path.abspath(os.path.dirname(__file__))
 UPLOAD_FOLDER_PLAYERS = os.path.join(base_dir, 'uploads', 'players')
@@ -79,70 +74,88 @@ thread_lock = threading.Lock()
 
 def background_timer():
     global auction_timer
-    while auction_timer["active"]:
-        if auction_timer["end_time"] and not auction_timer["paused"]:
-            now = datetime.now(timezone.utc)
-            remaining = (auction_timer["end_time"] - now).total_seconds()
 
-            if remaining <= 0:
-                remaining = 0
-                auction_timer["active"] = False
-                auction_timer["remaining_seconds"] = 0
-                socketio.emit("timer_update", 0, to=None)
+    # Avoid multiple overlapping threads
+    if auction_timer.get("thread_running"):
+        print("⚠️ Timer thread already running. Skipping new start.")
+        return
 
-                # ✅ Move player to unsold table safely
-                try:
-                    conn = get_db_connection()
-                    cursor = conn.cursor(dictionary=True)
+    auction_timer["thread_running"] = True
+    print("🕒 Timer thread started.")
 
-                    cursor.execute("SELECT player_id FROM current_auction LIMIT 1")
-                    current = cursor.fetchone()
+    try:
+        while auction_timer["active"]:
+            # Only run countdown if we have an end time and it's not paused
+            if auction_timer["end_time"] and not auction_timer["paused"]:
+                now = datetime.now(timezone.utc)
+                remaining = (auction_timer["end_time"] - now).total_seconds()
 
-                    if current and "player_id" in current:
-                        player_id = current["player_id"]
+                # 🧨 When time runs out
+                if remaining <= 0:
+                    remaining = 0
+                    auction_timer["active"] = False
+                    auction_timer["remaining_seconds"] = 0
+                    socketio.emit("timer_update", 0, to=None)
 
-                        cursor.execute("""
-                            INSERT INTO unsold_players (player_id, reason, auction_round, added_on)
-                            VALUES (%s, %s, %s, NOW())
-                        """, (player_id, "No bids placed", 1))
-                        conn.commit()
+                    # ✅ Move player to unsold table safely
+                    try:
+                        conn = get_db_connection()
+                        cursor = conn.cursor(dictionary=True)
 
-                        # ✅ Remove player from current_auction table after moving to unsold
-                        cursor.execute("DELETE FROM current_auction WHERE player_id = %s", (player_id,))
-                        conn.commit()
-                        print(f"🗑️ Player {player_id} removed from current_auction after being marked UNSOLD")
+                        cursor.execute("SELECT player_id FROM current_auction LIMIT 1")
+                        current = cursor.fetchone()
 
-                        
-                        cursor.execute("""
-                            SELECT p.id, p.name, p.image_path, p.base_price
-                            FROM players p
-                            WHERE p.id = %s
-                        """, (player_id,))
-                        player_data = cursor.fetchone()
+                        if current and "player_id" in current:
+                            player_id = current["player_id"]
 
-                        socketio.emit("auction_ended", safe_json({
-                            "status": "unsold",
-                            "message": "No bids were placed. Player moved to Unsold list.",
-                            "player": player_data
-                        }), to=None)
-                        print(f"✅ Player {player_id} moved to unsold_players table.")
+                            # Insert player into unsold_players
+                            cursor.execute("""
+                                INSERT INTO unsold_players (player_id, reason, auction_round, added_on)
+                                VALUES (%s, %s, %s, NOW())
+                            """, (player_id, "No bids placed", 1))
+                            conn.commit()
 
-                    else:
-                        print("⚠️ No player found in current_auction — skipping insert.")
+                            # Remove player from current_auction
+                            cursor.execute("DELETE FROM current_auction WHERE player_id = %s", (player_id,))
+                            conn.commit()
+                            print(f"🗑️ Player {player_id} removed from current_auction after being marked UNSOLD")
 
-                    cursor.close()
-                    conn.close()
+                            # Fetch player data for frontend
+                            cursor.execute("""
+                                SELECT p.id, p.name, p.image_path, p.base_price
+                                FROM players p
+                                WHERE p.id = %s
+                            """, (player_id,))
+                            player_data = cursor.fetchone()
 
-                except Exception as e:
-                    print(f"❌ Timer thread error: {e}")
+                            socketio.emit("auction_ended", safe_json({
+                                "status": "unsold",
+                                "message": "No bids were placed. Player moved to Unsold list.",
+                                "player": player_data
+                            }), to=None)
+                            print(f"✅ Player {player_id} moved to unsold_players table.")
 
-                break
+                        else:
+                            print("⚠️ No player found in current_auction — skipping insert.")
 
-            auction_timer["remaining_seconds"] = int(remaining)
-            socketio.emit("timer_update", int(remaining), to=None)
+                        cursor.close()
+                        conn.close()
 
-        socketio.sleep(1)
+                    except Exception as e:
+                        print(f"❌ Timer thread error: {e}")
 
+                    # ✅ Stop the timer loop after moving player
+                    break
+
+                # ⏱️ Otherwise, keep updating remaining seconds
+                auction_timer["remaining_seconds"] = int(remaining)
+                socketio.emit("timer_update", int(remaining), to=None)
+
+            socketio.sleep(1)
+
+    finally:
+        auction_timer["thread_running"] = False
+        print("✅ Timer thread stopped.")
 
 
 @app.route('/pause-auction', methods=['POST'])
@@ -170,10 +183,19 @@ def resume_auction():
     
     if not auction_timer["paused"]:
         return jsonify({'error': 'Auction is not paused'}), 400
+    
+    if auction_timer["remaining_seconds"] <= 0:
+        return jsonify({'error': 'Cannot resume. Auction time has already ended.'}), 400
 
     # Reset end_time based on remaining_seconds
     auction_timer["end_time"] = datetime.now(timezone.utc) + timedelta(seconds=auction_timer["remaining_seconds"])
     auction_timer["paused"] = False
+    auction_timer["active"] = True
+
+    # Restart background timer thread safely
+    thread = threading.Thread(target=background_timer)
+    thread.daemon = True
+    thread.start()
 
     socketio.emit("auction_resumed", {"remaining": auction_timer["remaining_seconds"]}, to=None)
     return jsonify({"message": "Auction resumed"}), 200
