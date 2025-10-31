@@ -166,14 +166,37 @@ def pause_auction():
     if not auction_timer["active"]:
         return jsonify({'error': 'No active auction'}), 400
 
-    # Freeze remaining time
     now = datetime.now(timezone.utc)
     if auction_timer["end_time"]:
-        auction_timer["remaining_seconds"] = max(0, int((auction_timer["end_time"] - now).total_seconds()))
+        remaining = max(0, int((auction_timer["end_time"] - now).total_seconds()))
+        auction_timer["remaining_seconds"] = remaining
+
     auction_timer["paused"] = True
 
-    socketio.emit("auction_paused", {"remaining": auction_timer["remaining_seconds"]}, to=None)
-    return jsonify({"message": "Auction paused", "remaining": auction_timer["remaining_seconds"]}), 200
+    # ✅ Persist pause state to DB
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE current_auction
+            SET paused = %s, paused_remaining = %s
+            WHERE id = (SELECT id FROM current_auction LIMIT 1)
+        """, (1, auction_timer["remaining_seconds"]))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"❌ DB update failed on pause: {e}")
+
+    socketio.emit("auction_paused", {
+        "paused": True,
+        "remaining": auction_timer["remaining_seconds"]
+    })
+    return jsonify({
+        "message": "Auction paused",
+        "remaining": auction_timer["remaining_seconds"]
+    }), 200
+
 
 
 @app.route('/resume-auction', methods=['POST'])
@@ -187,17 +210,35 @@ def resume_auction():
     if auction_timer["remaining_seconds"] <= 0:
         return jsonify({'error': 'Cannot resume. Auction time has already ended.'}), 400
 
-    # Reset end_time based on remaining_seconds
+    # ✅ Calculate new end time
     auction_timer["end_time"] = datetime.now(timezone.utc) + timedelta(seconds=auction_timer["remaining_seconds"])
     auction_timer["paused"] = False
     auction_timer["active"] = True
 
-    # Restart background timer thread safely
+    # ✅ Clear paused fields and update new expiry in DB
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE current_auction
+            SET paused = %s, paused_remaining = NULL, expires_at = %s
+            WHERE id = (SELECT id FROM current_auction LIMIT 1)
+        """, (0, auction_timer["end_time"]))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"❌ DB update failed on resume: {e}")
+
+    # ✅ Restart timer thread
     thread = threading.Thread(target=background_timer)
     thread.daemon = True
     thread.start()
 
-    socketio.emit("auction_resumed", {"remaining": auction_timer["remaining_seconds"]}, to=None)
+    socketio.emit("auction_resumed", {
+        "paused": False,
+        "remaining": auction_timer["remaining_seconds"]
+    })
     return jsonify({"message": "Auction resumed"}), 200
 
 
@@ -216,32 +257,43 @@ def fetch_current_auction():
     return row
 
 def broadcast_auction_update():
-    """Send updated highest bid and auction player to all connected clients"""
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     cursor.execute("SELECT * FROM current_auction LIMIT 1")
     auction = cursor.fetchone()
     if not auction:
-        # auction cleared
         socketio.emit("auction_cleared", {"message": "No active auction"})
-        cursor.close(); conn.close(); return
+        cursor.close()
+        conn.close()
+        return
 
-    player_id = auction['player_id']
-    # Get players info
+    player_id = auction["player_id"]
     cursor.execute("SELECT * FROM players WHERE id = %s", (player_id,))
     player = cursor.fetchone()
 
-    # Get highest bid
-    cursor.execute("""SELECT b.team_id, b.bid_amount, t.name AS team_name
-                      FROM bids b JOIN teams t ON b.team_id = t.id
-                      WHERE b.player_id = %s ORDER BY b.bid_amount DESC, b.bid_time ASC LIMIT 1""",
-                   (player_id,))
-    highest = cursor.fetchone()
+    # Compute remaining time
+    paused = bool(auction.get("paused"))
+    paused_remaining = auction.get("paused_remaining")
+    expires_at = auction.get("expires_at")
+
+    if paused:
+        time_left = int(paused_remaining or 0)
+    else:
+        if isinstance(expires_at, str):
+            expires_at = datetime.fromisoformat(expires_at)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        time_left = max(0, int((expires_at - datetime.now(timezone.utc)).total_seconds()))
+
+    payload = {
+        "player": player,
+        "paused": paused,
+        "time_left": time_left
+    }
+
+    socketio.emit("auction_update", payload)
     cursor.close()
     conn.close()
-
-    payload = {"player": player, "highest_bid": highest}
-    socketio.emit("auction_update", payload)
 
 @socketio.on("connect")
 def on_connect():
