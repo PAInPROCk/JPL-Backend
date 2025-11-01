@@ -1,5 +1,4 @@
 import eventlet
-eventlet.monkey_patch()
 # ---- eventlet must be first ----
 
 # ---- now normal imports ----
@@ -112,7 +111,7 @@ def background_timer(player_id, expires_at, mode, session_id):
             # 🔍 Get highest bid
             cursor.execute("""
                 SELECT b.team_id, b.bid_amount, t.name AS team_name
-                FROM bids b JOIN teams t ON b.team_id = t.id
+                FROM bids b JOIN teams t ON b.team_id = t.team_id
                 WHERE b.player_id = %s
                 ORDER BY b.bid_amount DESC, b.bid_time ASC LIMIT 1
             """, (player_id,))
@@ -132,7 +131,7 @@ def background_timer(player_id, expires_at, mode, session_id):
                     "status": "unsold",
                     "player": {"id": player_id},
                     "message": "No bids received – player marked unsold"
-                }, broadcast=True)
+                }, to=None)
             else:
                 # --- SOLD LOGIC ---
                 print(f"✅ Player {player_id} SOLD to Team {top_bid['team_name']} for ₹{top_bid['bid_amount']}")
@@ -1977,4 +1976,4 @@ def sold_players():
 # ✅ Run app
 if __name__ == '__main__':
     print("🚀 Starting JPL backend with Eventlet...")
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    socketio.run(app, host="0.0.0.0", port=5000, debug=True, use_reloader=False)
