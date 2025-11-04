@@ -120,18 +120,39 @@ def background_timer(player_id, expires_at, mode, session_id):
             if not top_bid:
                 # --- UNSOLD LOGIC ---
                 print(f"🗑️ Player {player_id} marked UNSOLD")
+
+                # Delete from current auction
                 cursor.execute("DELETE FROM current_auction WHERE player_id=%s", (player_id,))
+
+                # Insert into unsold_players table
                 cursor.execute("""
                     INSERT INTO unsold_players (player_id, reason, session_id)
                     VALUES (%s, %s, %s)
                 """, (player_id, "No bids received", session_id))
                 conn.commit()
 
+                # 🧩 Fetch full player info for frontend display
+                cursor.execute("""
+                    SELECT id, name, category, type, image_path, base_price
+                    FROM players
+                    WHERE id = %s
+                """, (player_id,))
+                player_info = cursor.fetchone()
+
+                if player_info:
+                    player_info = safe_json(player_info)
+                    print(f"📤 Sending unsold event with full player info for Player {player_info['name']}")
+                else:
+                    print(f"⚠️ Player {player_id} not found in players table")
+                    player_info = {"id": player_id, "name": "Unknown", "image_path": None}
+
+                # Emit the unsold event with full player data
                 socketio.emit("auction_ended", {
                     "status": "unsold",
-                    "player": {"id": player_id},
+                    "player": player_info,
                     "message": "No bids received – player marked unsold"
                 }, to=None)
+
             else:
                 # --- SOLD LOGIC ---
                 print(f"✅ Player {player_id} SOLD to Team {top_bid['team_name']} for ₹{top_bid['bid_amount']}")
@@ -147,7 +168,7 @@ def background_timer(player_id, expires_at, mode, session_id):
                     "player": {"id": player_id},
                     "team_name": top_bid["team_name"],
                     "price": top_bid["bid_amount"]
-                }, broadcast=True)
+                }, to=None)
 
             # 🔁 NEXT PLAYER LOGIC
             if mode == "random":
@@ -163,7 +184,7 @@ def background_timer(player_id, expires_at, mode, session_id):
                 next_player = cursor.fetchone()
                 if next_player:
                     next_id = next_player["id"]
-                    duration = 600  # 10 min default
+                    duration = 200  # 10 min default
                     start_time = datetime.now(timezone.utc)
                     next_expires = start_time + timedelta(seconds=duration)
 
@@ -181,7 +202,7 @@ def background_timer(player_id, expires_at, mode, session_id):
                         "player_id": next_id,
                         "expires_at": next_expires.isoformat(),
                         "mode": mode
-                    }, broadcast=True)
+                    }, to=None)
 
         except Exception as e:
             print(f"❌ Error in background_timer for player {player_id}: {e}")
@@ -1420,7 +1441,7 @@ def start_auction():
         cursor.execute("DELETE FROM current_auction")
 
         # ⏱️ Auction setup
-        auction_duration = 600  # 10 minutes default
+        auction_duration = 200  # 10 minutes default
         start_time = datetime.now(timezone.utc)
         expires_at = start_time + timedelta(seconds=auction_duration)
         session_id = session.get('session_id', 'default')
