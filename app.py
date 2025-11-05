@@ -73,11 +73,13 @@ thread_lock = threading.Lock()
 
 def background_timer(player_id, expires_at, mode, session_id):
     """
-    Per-player timer that:
-    - Respects DB 'paused' and possible 'expires_at' updates (so pause/resume via DB works).
-    - Emits timer_update with server_time each second (for useSyncedTimer).
-    - Handles sold/unsold transactionally and starts next player if needed.
-    - ✅ Skips emitting timer_update while paused (optimization)
+    Unified version:
+    - Respects pause/resume state from DB.
+    - Emits timer_update with server_time each second.
+    - Emits full player info on UNSOLD.
+    - Uses 200s duration for random mode.
+    - Safe timezone handling.
+    - Uses 'to=None' for all socket emits.
     """
     from datetime import datetime, timezone, timedelta
 
@@ -94,7 +96,7 @@ def background_timer(player_id, expires_at, mode, session_id):
                     expires_at = expires_at.replace(tzinfo=timezone.utc)
 
             while True:
-                # 🔁 Refresh auction row from DB to pick up pause/resume/cancel changes
+                # Refresh auction row to check pause/resume/cancel
                 conn = get_db_connection()
                 cursor = conn.cursor(dictionary=True)
                 try:
@@ -108,12 +110,11 @@ def background_timer(player_id, expires_at, mode, session_id):
                     cursor.close()
                     conn.close()
 
-                # Stop if auction record is gone
                 if not row:
                     print(f"⚠️ current_auction row missing for player {player_id} - stopping timer")
                     break
 
-                # Normalize DB expires_at
+                # Normalize expires_at
                 db_expires = row.get("expires_at") or expires_at
                 if isinstance(db_expires, str):
                     try:
@@ -123,7 +124,7 @@ def background_timer(player_id, expires_at, mode, session_id):
                 if db_expires.tzinfo is None:
                     db_expires = db_expires.replace(tzinfo=timezone.utc)
 
-                # ⏸️ If paused, emit paused state *once* and skip updates
+                # If paused, emit paused state once and skip updates
                 if row.get("paused"):
                     print(f"⏸️ Timer paused, skipping emit for player {player_id}")
                     socketio.emit("auction_paused", {
@@ -131,20 +132,15 @@ def background_timer(player_id, expires_at, mode, session_id):
                         "remaining": int(row.get("paused_remaining") or 0)
                     }, to=None)
                     socketio.sleep(1)
-                    continue  # skip emitting timer updates while paused
+                    continue
 
-                # Normal timer operation
                 now = datetime.now(timezone.utc)
-                # ✅ Ensure both datetimes are timezone-aware before subtracting
-                if db_expires.tzinfo is None:
-                    db_expires = db_expires.replace(tzinfo=timezone.utc)
                 if now.tzinfo is None:
                     now = now.replace(tzinfo=timezone.utc)
 
                 remaining = (db_expires - now).total_seconds()
 
                 if remaining > 0:
-                    # ✅ Emit timer update only when not paused
                     socketio.emit("timer_update", {
                         "remaining_seconds": int(remaining),
                         "server_time": datetime.now(timezone.utc).isoformat()
@@ -152,7 +148,7 @@ def background_timer(player_id, expires_at, mode, session_id):
                     socketio.sleep(1)
                     continue
 
-                # 🧾 Time expired → sold/unsold handling
+                # Time expired -> SOLD / UNSOLD logic
                 conn = get_db_connection()
                 cursor = conn.cursor(dictionary=True)
                 try:
@@ -163,13 +159,12 @@ def background_timer(player_id, expires_at, mode, session_id):
                         conn.rollback()
                         break
 
-                    # If paused right before expiry, just continue loop
                     if auction.get("paused"):
                         expires_at = auction.get("expires_at") or db_expires
                         conn.commit()
                         continue
 
-                    # 🔍 Get highest bid
+                    # Get highest bid
                     cursor.execute("""
                         SELECT b.team_id, b.bid_amount, t.name AS team_name
                         FROM bids b
@@ -181,21 +176,37 @@ def background_timer(player_id, expires_at, mode, session_id):
                     top_bid = cursor.fetchone()
 
                     if not top_bid:
-                        # 🗑️ Unsold
+                        # UNSOLD
+                        print(f"🗑️ Player {player_id} marked UNSOLD")
                         cursor.execute("DELETE FROM current_auction WHERE player_id=%s", (player_id,))
                         cursor.execute("""
-                            INSERT INTO unsold_players (player_id, reason, session_id, added_on)
-                            VALUES (%s, %s, %s, NOW())
+                            INSERT INTO unsold_players (player_id, reason, session_id)
+                            VALUES (%s, %s, %s)
                         """, (player_id, "No bids received", session_id))
                         conn.commit()
 
+                        # Fetch full player info for frontend
+                        cursor.execute("""
+                            SELECT id, name, category, type, image_path, base_price
+                            FROM players
+                            WHERE id = %s
+                        """, (player_id,))
+                        player_info = cursor.fetchone()
+                        if player_info:
+                            player_info = safe_json(player_info)
+                            print(f"📤 Sending unsold event with full player info for Player {player_info['name']}")
+                        else:
+                            print(f"⚠️ Player {player_id} not found in players table")
+                            player_info = {"id": player_id, "name": "Unknown", "image_path": None}
+
                         socketio.emit("auction_ended", {
                             "status": "unsold",
-                            "player": {"id": player_id},
+                            "player": player_info,
                             "message": "No bids received – player marked unsold"
                         }, to=None)
                     else:
-                        # ✅ Sold
+                        # SOLD
+                        print(f"✅ Player {player_id} SOLD to Team {top_bid['team_name']} for ₹{top_bid['bid_amount']}")
                         cursor.execute("""
                             INSERT INTO sold_players (player_id, team_id, sold_price, session_id, sold_on)
                             VALUES (%s, %s, %s, %s, NOW())
@@ -210,7 +221,7 @@ def background_timer(player_id, expires_at, mode, session_id):
                             "price": top_bid["bid_amount"]
                         }, to=None)
 
-                    # 🔁 Random mode → next player
+                    # Random mode → next player
                     if mode == "random":
                         cursor.execute("""
                             SELECT id FROM players
@@ -224,7 +235,7 @@ def background_timer(player_id, expires_at, mode, session_id):
                         next_player = cursor.fetchone()
                         if next_player:
                             next_id = next_player["id"]
-                            duration = 600  # default 10 mins
+                            duration = 200  # new shorter duration
                             start_time = datetime.now(timezone.utc)
                             next_expires = start_time + timedelta(seconds=duration)
 
@@ -242,7 +253,7 @@ def background_timer(player_id, expires_at, mode, session_id):
                                 "mode": mode
                             }, to=None)
 
-                    break  # done for this player
+                    break
 
                 except Exception as e:
                     print(f"❌ Error in background_timer for player {player_id}: {e}")
@@ -256,6 +267,7 @@ def background_timer(player_id, expires_at, mode, session_id):
             print(f"❌ Fatal background_timer error for player {player_id}: {e}")
         finally:
             print(f"🏁 Timer thread ended for player {player_id}")
+
 
 
 @app.route('/pause-auction', methods=['POST'])
@@ -1578,7 +1590,7 @@ def start_auction():
         cursor.execute("DELETE FROM current_auction")
 
         # ⏱️ Auction setup
-        auction_duration = 600  # 10 minutes default
+        auction_duration = 200  # 10 minutes default
         start_time = datetime.now(timezone.utc)
         expires_at = start_time + timedelta(seconds=auction_duration)
         session_id = session.get('session_id', 'default')
