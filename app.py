@@ -270,6 +270,8 @@ def background_timer(player_id, expires_at, mode, session_id):
 
 
 
+
+
 @app.route('/pause-auction', methods=['POST'])
 def pause_auction():
     if 'user' not in session or session['user'].get('role') != 'admin':
@@ -1291,7 +1293,6 @@ def add_player():
         return jsonify({'error': 'Forbidden'}), 403
     print("📥 FORM DATA RECEIVED:", request.form.to_dict())
 
-
     # Extract form data
     first_name = request.form.get('playerName', '').strip()
     father_name = request.form.get('fatherName', '').strip()
@@ -1315,7 +1316,6 @@ def add_player():
         if single_team:
             team_ids = [single_team]
     teams_played = len(team_ids)
-
 
     # ✅ Combine names safely
     full_name = " ".join(
@@ -1346,12 +1346,12 @@ def add_player():
         # ✅ Insert into players table
         cursor.execute("""
             INSERT INTO players 
-            (name, nickname, age, gender, category, type, base_price, total_runs, highest_runs, 
-             wickets_taken, times_out, image_path, jersey, mobile_No, email_Id, teams_played)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (name, nickname, age, category, type, base_price, total_runs, highest_runs, 
+             wickets_taken, times_out, image_path, jersey, mobile_No, email_Id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            full_name, nickname, age, gender, category, type_, base_price, total_runs, highest_runs,
-            wickets_taken, times_out, image_path, jersey_number, mobile_no, email, teams_played
+            full_name, nickname, age, category, type_, base_price, total_runs, highest_runs,
+            wickets_taken, times_out, image_path, jersey_number, mobile_no, email
         ))
 
         player_id = cursor.lastrowid
@@ -1366,10 +1366,9 @@ def add_player():
         conn.commit()
         return jsonify({"message": "Player added successfully!", "player_id": player_id}), 201
 
-    except mysql.connector.IntegrityError as err:
+    except mysql.connector.IntegrityError:
         conn.rollback()
-        print("⚠️ IntegrityError:", err)
-        return jsonify({"error": f"Integrity error: {str(err)}"}), 400
+        return jsonify({"error": "Player with same name or jersey number exists"}), 400
     except mysql.connector.Error as err:
         conn.rollback()
         return jsonify({"error": str(err)}), 500
@@ -1776,15 +1775,15 @@ def get_current_auction():
                 "category": auction["category"],
                 "type": auction["type"],
                 "image_path": auction["image_path"],
-                "base_price": base_price
+                "base_price": auction["base_price"]
             },
             "currentBid": current_bid,
             "remaining_seconds": remaining,
             "auction_duration": auction["auction_duration"],
             "teamBalance": team_balance,
             "nextSteps": next_steps,
-            "canBid": user.get("role") == "team",
-            "history": []  # you can add bid history later if needed
+            "canBid": user.get("role") == "team",  # only teams can bid
+            "history": []  # can be populated later
         }), 200
 
     except Exception as e:
