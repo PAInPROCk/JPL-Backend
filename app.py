@@ -45,7 +45,10 @@ app.secret_key = "jpl_secret_here"
 app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=False,
-    SESSION_COOKIE_HTTPONLY=True
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_PERMANENT= True,
+    PERMANENT_SESSION_LIFETIME= timedelta(hours=2),
+    SESSION_TYPE="filesystem"
 )
 
 # ---- CORS setup ----
@@ -168,7 +171,7 @@ def background_timer(player_id, expires_at, mode, session_id):
                     cursor.execute("""
                         SELECT b.team_id, b.bid_amount, t.name AS team_name
                         FROM bids b
-                        JOIN teams t ON b.team_id = t.id
+                        JOIN teams t ON b.team_id = t.team_id
                         WHERE b.player_id = %s
                         ORDER BY b.bid_amount DESC, b.bid_time ASC
                         LIMIT 1
@@ -235,7 +238,7 @@ def background_timer(player_id, expires_at, mode, session_id):
                         next_player = cursor.fetchone()
                         if next_player:
                             next_id = next_player["id"]
-                            duration = 200  # new shorter duration
+                            duration = 120  # new shorter duration
                             start_time = datetime.now(timezone.utc)
                             next_expires = start_time + timedelta(seconds=duration)
 
@@ -608,7 +611,7 @@ def broadcast_auction_update():
     player = cursor.fetchone()
 
     cursor.execute("""SELECT b.team_id, b.bid_amount, t.name AS team_name
-                   FROM bids b JOIN teams t ON b.team_id = t.id
+                   FROM bids b JOIN teams t ON b.team_id = t.team_id
                    WHERE b.player_id=%s ORDER BY b.bid_amount DESC LIMIT 1""", (player_id,))
     highest = cursor.fetchone()
     cursor.close()
@@ -1601,7 +1604,7 @@ def start_auction():
         cursor.execute("DELETE FROM current_auction")
 
         # ⏱️ Auction setup
-        auction_duration = 200  # 10 minutes default
+        auction_duration = 120  # 10 minutes default
         start_time = datetime.now(timezone.utc)
         expires_at = start_time + timedelta(seconds=auction_duration)
         session_id = session.get('session_id', 'default')
@@ -1991,7 +1994,7 @@ def end_auction():
             cursor.execute("""
                 SELECT b.team_id, b.bid_amount, t.name AS team_name
                 FROM bids b
-                JOIN teams t ON b.team_id = t.id
+                JOIN teams t ON b.team_id = t.team_id
                 WHERE b.player_id = %s
                 ORDER BY b.bid_amount DESC, b.bid_time ASC
                 LIMIT 1
@@ -2129,7 +2132,7 @@ def sold_players():
                    sp.sold_price, sp.sold_time
             FROM sold_players sp
             JOIN players p ON sp.player_id = p.id
-            JOIN teams t ON sp.team_id = t.id
+            JOIN teams t ON sp.team_id = t.team_id
             ORDER BY sp.sold_time DESC
             LIMIT %s OFFSET %s
             """,
