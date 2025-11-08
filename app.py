@@ -644,42 +644,78 @@ def handle_end_auction(data):
 
 @app.route('/cancel-auction', methods=['POST'])
 def cancel_auction():
+    """Cancel the current auction manually (admin only). 
+    Marks player as UNSOLD and notifies all clients."""
     if 'user' not in session or session['user'].get('role') != 'admin':
         return jsonify({'error': 'Forbidden'}), 403
 
+    from datetime import datetime, timezone
+    import decimal
+
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
+
     try:
+        # 🎯 Step 1: Fetch current auction
         cursor.execute("SELECT * FROM current_auction LIMIT 1")
         auction = cursor.fetchone()
         if not auction:
             return jsonify({"error": "No active auction"}), 400
 
         player_id = auction['player_id']
+        session_id = auction.get('session_id', 'default')
 
-        # ❌ Stop timer
+        # 🎯 Step 2: Fetch player info for frontend
+        cursor.execute("""
+            SELECT id, name, category, type, image_path, base_price
+            FROM players WHERE id = %s
+        """, (player_id,))
+        player_info = cursor.fetchone() or {"id": player_id, "name": "Unknown", "image_path": None}
+
+        # 🎯 Step 3: Stop global auction timer
         global auction_timer
         auction_timer["active"] = False
         auction_timer["paused"] = False
         auction_timer["end_time"] = None
         auction_timer["remaining_seconds"] = 0
 
-        # ➕ Optionally log player as unsold
-        cursor.execute("INSERT INTO unsold_players (player_id) VALUES (%s)", (player_id,))
+        # 🎯 Step 4: Insert player as UNSOLD in DB
+        cursor.execute("""
+            INSERT INTO unsold_players (player_id, reason, session_id, added_on)
+            VALUES (%s, %s, %s, NOW())
+        """, (player_id, "Auction manually cancelled", session_id))
+
+        # 🧹 Step 5: Remove from current_auction table
         cursor.execute("DELETE FROM current_auction WHERE player_id = %s", (player_id,))
         conn.commit()
 
-        # 🔔 Notify all clients
-        socketio.emit("auction_cancelled", {
-            "message": "Auction cancelled",
-            "player_id": player_id
+        # 🎯 Step 6: Convert Decimal to float for safe JSON serialization
+        def safe_json(obj):
+            if isinstance(obj, decimal.Decimal):
+                return float(obj)
+            return obj
+
+        player_info = {k: safe_json(v) for k, v in player_info.items()}
+
+        # 🎯 Step 7: Emit event to all clients (same as timer expiry)
+        socketio.emit("auction_ended", {
+            "status": "unsold",
+            "player": player_info,
+            "message": "Auction cancelled — player marked unsold manually"
         }, to=None)
 
-        return jsonify({"message": "Auction cancelled", "player_id": player_id}), 200
+        print(f"🛑 Auction cancelled manually for player {player_info.get('name')} (ID {player_id})")
+
+        return jsonify({
+            "message": f"Auction cancelled for player {player_info.get('name')}",
+            "player": player_info
+        }), 200
 
     except Exception as e:
         conn.rollback()
+        print(f"❌ Error in cancel_auction: {e}")
         return jsonify({"error": str(e)}), 500
+
     finally:
         cursor.close()
         conn.close()
@@ -1800,110 +1836,140 @@ def next_auction():
     # 🔐 Auth check
     if 'user' not in session:
         return jsonify({"error": "Unauthorized"}), 401
-
     if session['user'].get('role') != 'admin':
         return jsonify({"error": "Forbidden"}), 403
 
-    data = request.get_json() or {}
-    mode = data.get('mode', 'manual')
-    player_id = data.get('player_id')  # optional for manual mode
+    from datetime import datetime, timezone, timedelta
+    import eventlet
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        # ✅ Determine next player based on mode
-        if mode == "manual":
-            if not player_id:
-                return jsonify({'error': 'player_id required for manual mode'}), 400
-            cursor.execute("SELECT * FROM players WHERE id = %s", (player_id,))
-            next_player = cursor.fetchone()
+        # 🎯 Step 1: Get current auctioned player
+        cursor.execute("SELECT player_id, session_id, mode FROM current_auction LIMIT 1")
+        current = cursor.fetchone()
 
-        elif mode == "random":
-            cursor.execute("""
-                SELECT * FROM players
-                WHERE id NOT IN (SELECT player_id FROM sold_players)
-                ORDER BY RAND() LIMIT 1
-            """)
-            next_player = cursor.fetchone()
+        if not current:
+            return jsonify({"error": "No active auction found"}), 400
 
-        elif mode == "unsold":
-            cursor.execute("""
-                SELECT * FROM players
-                WHERE id NOT IN (SELECT player_id FROM sold_players)
-                AND id IN (SELECT player_id FROM auction_history WHERE status = 'unsold')
-                ORDER BY RAND() LIMIT 1
-            """)
-            next_player = cursor.fetchone()
+        player_id = current["player_id"]
+        session_id = current.get("session_id", "default")
+        mode = current.get("mode", "random")
 
-        elif mode == "custom":
-            # Example: load custom-filtered player
+        # 🎯 Step 2: Check for highest bid
+        cursor.execute("""
+            SELECT b.team_id, b.bid_amount, t.name AS team_name
+            FROM bids b
+            JOIN teams t ON b.team_id = t.team_id
+            WHERE b.player_id = %s
+            ORDER BY b.bid_amount DESC, b.bid_time ASC
+            LIMIT 1
+        """, (player_id,))
+        top_bid = cursor.fetchone()
+
+        # Fetch full player info (we'll use this in both cases)
+        cursor.execute("""
+            SELECT id, name, category, type, image_path, base_price
+            FROM players
+            WHERE id = %s
+        """, (player_id,))
+        player_info = cursor.fetchone()
+        if player_info:
+            player_info = safe_json(player_info)
+        else:
+            player_info = {"id": player_id, "name": "Unknown", "image_path": None}
+
+        # 🎯 Step 3: Decide sold or unsold
+        if top_bid:
+            # ✅ SOLD logic
             cursor.execute("""
-                SELECT * FROM players
-                WHERE category = 'All-Rounder' AND id NOT IN (SELECT player_id FROM sold_players)
-                ORDER BY RAND() LIMIT 1
-            """)
-            next_player = cursor.fetchone()
+                INSERT INTO sold_players (player_id, team_id, sold_price, session_id, sold_on)
+                VALUES (%s, %s, %s, %s, NOW())
+            """, (player_id, top_bid["team_id"], top_bid["bid_amount"], session_id))
+            sold_status = "sold"
+            sold_message = f"Player sold to {top_bid['team_name']} for ₹{top_bid['bid_amount']}"
+            print(f"✅ Player {player_info['name']} sold manually to {top_bid['team_name']}")
 
         else:
-            return jsonify({'error': f'Invalid mode: {mode}'}), 400
+            # ❌ UNSOLD logic
+            cursor.execute("""
+                INSERT INTO unsold_players (player_id, reason, session_id, added_on)
+                VALUES (%s, %s, %s, NOW())
+            """, (player_id, "No bids received - moved manually", session_id))
+            sold_status = "unsold"
+            sold_message = "No bids received – player marked unsold manually"
+            print(f"🗑️ Player {player_info['name']} marked unsold manually")
+
+        # 🧹 Step 4: Clear current auction
+        cursor.execute("DELETE FROM current_auction WHERE player_id=%s", (player_id,))
+        conn.commit()
+
+        # 🔊 Step 5: Notify all clients with full player info
+        socketio.emit("auction_ended", {
+            "status": sold_status,
+            "player": player_info,
+            "team_name": top_bid["team_name"] if top_bid else None,
+            "price": top_bid["bid_amount"] if top_bid else None,
+            "message": sold_message
+        })
+        print(f"📢 Emitted auction_ended for {player_info['name']} ({sold_status})")
+
+        # 🎯 Step 6: Pick next player
+        cursor.execute("""
+            SELECT id, name FROM players
+            WHERE id NOT IN (
+                SELECT player_id FROM sold_players
+                UNION
+                SELECT player_id FROM unsold_players
+            )
+            ORDER BY RAND() LIMIT 1
+        """)
+        next_player = cursor.fetchone()
 
         if not next_player:
-            return jsonify({"error": "No available player found for next auction"}), 404
+            print("🏁 All players processed — auction finished.")
+            return jsonify({"message": "All players processed — auction finished"}), 200
 
         next_player_id = next_player["id"]
 
-        # ✅ Clear existing auction before inserting next
-        cursor.execute("DELETE FROM current_auction")
+        # 💤 Step 7: Short delay before next player
+        print(f"⏳ Waiting 10 seconds before starting next player ({next_player['name']})...")
+        eventlet.sleep(10)
 
-        auction_duration = 600  # 10 min
+        # 🕐 Step 8: Start next player
+        auction_duration = 180  # 3 minutes
         start_time = datetime.now(timezone.utc)
         expires_at = start_time + timedelta(seconds=auction_duration)
 
-        # ✅ Insert new auction
         cursor.execute("""
-            INSERT INTO current_auction (player_id, start_time, expires_at, auction_duration)
-            VALUES (%s, %s, %s, %s)
-        """, (next_player_id, start_time, expires_at, auction_duration))
+            INSERT INTO current_auction (player_id, start_time, expires_at, auction_duration, mode, session_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (next_player_id, start_time, expires_at, auction_duration, mode, session_id))
         conn.commit()
 
-        player_id = auction_timer.get("player_id")
-        expires_at = auction_timer.get("end_time")
-        mode = auction_timer.get("mode", "manual")
-        session_id = auction_timer.get("session_id", "default")
+        # 🧵 Restart timer
+        socketio.start_background_task(background_timer, next_player_id, expires_at, mode, session_id)
 
-        # 🧵 Restart background timer
-        global timer_thread
-        with thread_lock:
-            if not timer_thread or not getattr(timer_thread, 'running', lambda: False)():
-                timer_thread = socketio.start_background_task(
-                        background_timer,
-                        next_player_id,
-                        expires_at,
-                        mode,
-                        session_id
-                )
-
-
-        # 📢 Notify all connected clients
+        # 📢 Notify clients about new player
         socketio.emit("auction_started", {
             "player_id": next_player_id,
             "player_name": next_player["name"],
             "mode": mode,
             "duration": auction_duration
-        }, to=None)
+        })
+        print(f"🚀 Next player started: {next_player['name']} (ID {next_player_id})")
 
         return jsonify({
-            "message": f"Moved to next player ({next_player['name']}) in {mode} mode",
-            "player_id": next_player_id,
-            "player_name": next_player["name"],
-            "mode": mode,
-            "status": "auction_moved"
+            "status": "auction_moved",
+            "message": f"Moved to next player ({next_player['name']})",
+            "sold_status": sold_status
         }), 200
 
-    except mysql.connector.Error as err:
+    except Exception as e:
         conn.rollback()
-        return jsonify({"error": str(err), "status": "error"}), 500
+        print(f"❌ Error in next_auction: {e}")
+        return jsonify({"error": str(e)}), 500
 
     finally:
         cursor.close()
