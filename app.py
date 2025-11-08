@@ -178,6 +178,34 @@ def background_timer(player_id, expires_at, mode, session_id):
                     """, (player_id,))
                     top_bid = cursor.fetchone()
 
+                    if top_bid:
+                        print(f"🏆 Player {player_id} SOLD to Team {top_bid['team_name']} for ₹{top_bid['bid_amount']}")
+
+                        #Deduct from team's purse
+                        cursor.execute("""
+                            UPDATE teams
+                            SET purse = purse - %s
+                            WHERE team_id = %s
+                        """, (top_bid['bid_amount'], top_bid['team_id']))
+
+                        #Insert into sold_players table
+                        cursor.execute("""
+                            INSERT INTO sold_players (player_id, team_id, amount, session_id, timestamp)
+                            VALUES (%s, %s, %s, %s, NOW())
+                        """, (player_id, top_bid['team_id'], top_bid['bid_amount'], session_id))
+
+                        #Remove from current Auction
+                        cursor.execute("DELETE FROM current_auction WHERE player_id = %s", (player_id,))
+                        conn.commit()
+
+                        #Broadcast to all clients
+                        socketio.emit("auction_ended",{
+                            "status": "sold",
+                            "player": safe_json(player_id),
+                            "team": safe_json(top_bid),
+                            "message": f"Player {player_id['name']} SOLD to {top_bid['team_name']} for ₹{top_bid['bid_amount']}"
+                        }, to=None)
+
                     if not top_bid:
                         # UNSOLD
                         print(f"🗑️ Player {player_id} marked UNSOLD")
