@@ -73,6 +73,45 @@ auction_timer = {
 timer_thread = None
 thread_lock = threading.Lock()
 
+from datetime import datetime, timezone
+
+def ensure_aware_utc(dt):
+    """
+    Convert datetime or ISO string to timezone-aware datetime in UTC.
+    Returns None if dt falsy.
+    """
+    if not dt:
+        return None
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt)
+        except Exception:
+            try:
+                dt = datetime.strptime(dt, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return None
+    # If it's a naive datetime, treat it as UTC
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+# ---------------- TIMEZONE SAFE UTILITY ----------------
+def seconds_remaining(expires_at):
+    """Safely calculate seconds remaining between expires_at and current UTC time."""
+    expires_at = ensure_aware_utc(expires_at)
+    if not expires_at:
+        return 0
+    if isinstance(expires_at, str):
+        try:
+            expires_at = datetime.fromisoformat(expires_at)
+        except Exception:
+            expires_at = datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S")
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    return max(0, int((expires_at - now).total_seconds()))
+
 
 def background_timer(player_id, expires_at, mode, session_id):
     """
@@ -141,7 +180,7 @@ def background_timer(player_id, expires_at, mode, session_id):
                 if now.tzinfo is None:
                     now = now.replace(tzinfo=timezone.utc)
 
-                remaining = (db_expires - now).total_seconds()
+                remaining = seconds_remaining(db_expires)
 
                 if remaining > 0:
                     socketio.emit("timer_update", {
@@ -299,9 +338,70 @@ def background_timer(player_id, expires_at, mode, session_id):
         finally:
             print(f"🏁 Timer thread ended for player {player_id}")
 
+@app.route('/mark-sold', methods=['POST'])
+def mark_sold():
+    if 'user' not in session or session['user']['role'] != 'admin':
+        return jsonify({'error': 'Unauthorized'}), 403
 
+    data = request.get_json()
+    player_id = data.get('player_id')
+    session_id = data.get('session_id')
 
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
 
+    try:
+        # Get top bid
+        cursor.execute("""
+            SELECT b.team_id, b.bid_amount, t.name AS team_name
+            FROM bids b
+            JOIN teams t ON b.team_id = t.team_id
+            WHERE b.player_id = %s
+            ORDER BY b.bid_amount DESC, b.bid_time ASC
+            LIMIT 1
+        """, (player_id,))
+        top_bid = cursor.fetchone()
+
+        if not top_bid:
+            return jsonify({"error": "No bids found for this player"}), 404
+
+        # Deduct purse
+        cursor.execute("""
+            UPDATE teams
+            SET purse = purse - %s
+            WHERE team_id = %s
+        """, (top_bid['bid_amount'], top_bid['team_id']))
+
+        # Insert into sold_players table
+        cursor.execute("""
+            INSERT INTO sold_players (player_id, team_id, amount, session_id, timestamp)
+            VALUES (%s, %s, %s, %s, NOW())
+        """, (player_id, top_bid['team_id'], top_bid['bid_amount'], session_id))
+
+        # Delete from current auction
+        cursor.execute("DELETE FROM current_auction WHERE player_id=%s", (player_id,))
+        conn.commit()
+
+        # Emit sold event to frontend
+        socketio.emit("auction_ended", {
+            "status": "sold",
+            "player_id": player_id,
+            "team_id": top_bid['team_id'],
+            "team_name": top_bid['team_name'],
+            "sold_price": float(top_bid['bid_amount']),
+            "message": f"✅ Player SOLD manually to {top_bid['team_name']} for ₹{top_bid['bid_amount']}"
+        }, to=None)
+
+        print(f"✅ Player {player_id} manually marked as SOLD by admin.")
+        return jsonify({"success": True, "message": "Player marked as SOLD"}), 200
+
+    except Exception as e:
+        conn.rollback()
+        print("❌ Error marking player sold:", e)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()
 
 @app.route('/pause-auction', methods=['POST'])
 def pause_auction():
@@ -322,7 +422,7 @@ def pause_auction():
             return jsonify({'error': 'Auction is already paused'}), 400
 
         # 🕒 Calculate remaining time
-        expires_at = auction['expires_at']
+        expires_at = ensure_aware_utc(auction['expires_at']) 
         if isinstance(expires_at, str):
             try:
                 expires_at = datetime.fromisoformat(expires_at)
@@ -333,7 +433,7 @@ def pause_auction():
             expires_at = expires_at.replace(tzinfo=timezone.utc)
 
         now = datetime.now(timezone.utc)
-        remaining = max(0, int((expires_at - now).total_seconds()))
+        remaining = seconds_remaining(expires_at)
 
         # 🔒 Update DB with paused state
         cursor.execute("""
@@ -451,44 +551,74 @@ def fetch_current_auction():
     conn.close()
     return row
 
+
+from datetime import datetime, timezone
+
 def broadcast_auction_update():
+    """
+    Broadcasts current auction status (player info, paused state, time left)
+    to all clients in a timezone-safe and stable way.
+    """
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM current_auction LIMIT 1")
-    auction = cursor.fetchone()
-    if not auction:
-        socketio.emit("auction_cleared", {"message": "No active auction"})
+    try:
+        # Fetch active auction
+        cursor.execute("SELECT * FROM current_auction LIMIT 1")
+        auction = cursor.fetchone()
+        if not auction:
+            socketio.emit("auction_cleared", {"message": "No active auction"})
+            return
+
+        player_id = auction["player_id"]
+
+        # Fetch player details
+        cursor.execute("""
+            SELECT id, name, category, type, image_path, base_price
+            FROM players
+            WHERE id = %s
+        """, (player_id,))
+        player = cursor.fetchone()
+
+        # Normalize expires_at safely
+        expires_at = ensure_aware_utc(auction.get("expires_at"))
+
+        paused = bool(auction.get("paused"))
+        paused_remaining = auction.get("paused_remaining") or 0
+
+        # 🔒 Compute remaining time
+        if paused:
+            time_left = int(paused_remaining)
+        else:
+            time_left = seconds_remaining(expires_at)
+
+        # Fetch highest bid (optional but useful)
+        cursor.execute("""
+            SELECT b.team_id, b.bid_amount, t.name AS team_name
+            FROM bids b
+            JOIN teams t ON b.team_id = t.team_id
+            WHERE b.player_id = %s
+            ORDER BY b.bid_amount DESC, b.bid_time ASC
+            LIMIT 1
+        """, (player_id,))
+        highest_bid = cursor.fetchone()
+
+        payload = {
+            "player": safe_json(player),
+            "paused": paused,
+            "time_left": time_left,
+            "highest_bid": safe_json(highest_bid) if highest_bid else None,
+            "server_time": datetime.now(timezone.utc).isoformat()
+        }
+
+        print(f"📢 Broadcasting auction update: Player {player_id}, remaining={time_left}s paused={paused}")
+        socketio.emit("auction_update", payload, to=None)
+
+    except Exception as e:
+        print(f"❌ Error in broadcast_auction_update(): {e}")
+        conn.rollback()
+    finally:
         cursor.close()
         conn.close()
-        return
-
-    player_id = auction["player_id"]
-    cursor.execute("SELECT * FROM players WHERE id = %s", (player_id,))
-    player = cursor.fetchone()
-
-    # Compute remaining time
-    paused = bool(auction.get("paused"))
-    paused_remaining = auction.get("paused_remaining")
-    expires_at = auction.get("expires_at")
-
-    if paused:
-        time_left = int(paused_remaining or 0)
-    else:
-        if isinstance(expires_at, str):
-            expires_at = datetime.fromisoformat(expires_at)
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        time_left = max(0, int((expires_at - datetime.now(timezone.utc)).total_seconds()))
-
-    payload = {
-        "player": player,
-        "paused": paused,
-        "time_left": time_left
-    }
-
-    socketio.emit("auction_update", payload)
-    cursor.close()
-    conn.close()
 
 @socketio.on("connect")
 def on_connect():
@@ -501,74 +631,80 @@ def on_connect():
         pass
     emit("connected", {"msg": "Connected to JPL socket", "user": user})
 
-@socketio.on('join_auction')
-def handle_join_auction(data):
-    team_id = data.get('team_id')
-    team_name = data.get('team_name')
-    purse = data.get('purse')
-    
-    sid = request.sid
+@socketio.on("join_auction")
+def join_auction(data):
+    if "user" not in session:
+        emit("error", {"error": "Unauthorized"})
+        return
+    user = session["user"]
+    team_id = user.get("team_id")
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT name, purse FROM teams WHERE team_id = %s", (team_id,))
+    team = cursor.fetchone()
+    conn.close()
+    team_name = team["name"] if team else "Unknown"
+    purse = team["purse"] if team else 0
     print(f"✅ Team {team_name} (ID: {team_id}) joined auction with purse ₹{purse}")
-    join_room("auction_room")
+    emit("team_joined", safe_json({
+        "team_id": team_id,
+        "team_name": team_name,
+        "purse": purse
+    }))
 
-    emit("joined_auction", {"message": f"{team_name} joined successfully"}, room="auction_room")
+
 
 @socketio.on("place_bid")
 def handle_place_bid(data):
-    """
-    data expected: {team_id, bid_amount}
-    Use session to find user/team, validate, insert DB, broadcast
-    """
-    # auth check
+    """data expected: {team_id, bid_amount}"""
+
     if "user" not in session:
         emit("error", {"error": "Unauthorized"})
         return
 
-    user = session['user']
-    # Basic validation
     team_id = data.get("team_id")
     bid_amount = data.get("bid_amount")
-    # add more validation (numeric, positive)
+
     try:
         bid_amount = float(bid_amount)
     except:
         emit("error", {"error": "Invalid bid amount"})
         return
 
-    # Insert or update bid (use existing place-bid logic but via socket)
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     try:
-        # Check current auction
+        # Get current auction player
         cursor.execute("SELECT * FROM current_auction LIMIT 1")
         auction = cursor.fetchone()
         if not auction:
             emit("error", {"error": "No active auction"})
             return
-        player_id = auction['player_id']
+        player_id = auction["player_id"]
 
-        # Check team budget
-        cursor.execute("SELECT id, name, budget FROM teams WHERE id = %s", (team_id,))
+        # ✅ Correct column names
+        cursor.execute("SELECT team_id, name, purse FROM teams WHERE team_id = %s", (team_id,))
         team = cursor.fetchone()
         if not team:
             emit("error", {"error": "Team not found"})
             return
-        if team['budget'] < bid_amount:
-            emit("error", {"error": "Insufficient budget"})
+
+        if team["purse"] < bid_amount:
+            emit("error", {"error": "Insufficient purse"})
             return
 
         # Get highest bid
         cursor.execute("SELECT MAX(bid_amount) AS highest_bid FROM bids WHERE player_id = %s", (player_id,))
         result = cursor.fetchone()
-        highest_bid = result['highest_bid'] or 0
-        MIN_INCREMENT = 10
+        highest_bid = result["highest_bid"] or 0
+        MIN_INCREMENT = 500  # or 1000 based on your rule
         min_required = max(0, highest_bid + MIN_INCREMENT)
 
         if bid_amount < min_required:
-            emit("error", {"error": f"Minimum required bid is {min_required}"})
+            emit("error", {"error": f"Minimum required bid is ₹{min_required}"})
             return
 
-        # Insert or update
+        # Insert or update bid
         cursor.execute("""
             INSERT INTO bids (player_id, team_id, bid_amount)
             VALUES (%s, %s, %s)
@@ -576,11 +712,13 @@ def handle_place_bid(data):
         """, (player_id, team_id, bid_amount))
         conn.commit()
 
-        # Broadcast updated auction state
+        # Broadcast to all clients
+        emit("bid_placed", {"status": "ok", "team_id": team_id, "team_name": team["name"], "bid_amount": bid_amount}, to=None)
         broadcast_auction_update()
-        emit("bid_placed", {"status": "ok", "team_id": team_id, "bid_amount": bid_amount}, to=None)
+
     except Exception as e:
         conn.rollback()
+        print("⚠️ Bid Error:", e)
         emit("error", {"error": str(e)})
     finally:
         cursor.close()
@@ -622,44 +760,6 @@ def auto_end_auction(player_id, expires_at):
             socketio.emit("auction_ended", {"player_id": player_id}, to=None)
         cursor.close()
         conn.close()
-
-def broadcast_auction_update():
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM current_auction LIMIT 1")
-    auction = cursor.fetchone()
-    if not auction:
-        socketio.emit("auction_cleared", {"message": "No Active auction"})
-        cursor.close()
-        conn.close()
-        return
-    
-    player_id = auction["player_id"]
-    expires_at = auction["expires_at"]
-
-    cursor.execute("SELECT * FROM players WHERE id=%s", (player_id,))
-    player = cursor.fetchone()
-
-    cursor.execute("""SELECT b.team_id, b.bid_amount, t.name AS team_name
-                   FROM bids b JOIN teams t ON b.team_id = t.team_id
-                   WHERE b.player_id=%s ORDER BY b.bid_amount DESC LIMIT 1""", (player_id,))
-    highest = cursor.fetchone()
-    cursor.close()
-    conn.close()
-
-    time_left = None
-    if expires_at:
-        expires_dt = expires_at if isinstance(expires_at, datetime) else datetime.fromisoformat(str(expires_at))
-        time_left = max(0, int((expires_dt - datetime.now(timezone.utc)).total_seconds()))
-
-    
-    payload = {
-        "player": player,
-        "highest_bid": highest,
-        "expires_at": expires_at.isoformat() if expires_at else None,
-        "time_left": time_left
-    }
-    socketio.emit("auction_update", payload)
 
 @socketio.on("end_auction_socket")
 def handle_end_auction(data):
@@ -1735,25 +1835,35 @@ def auction_status():
 
 @app.route('/auction-time', methods=['GET'])
 def get_timer():
-    conn = get_db_connection
+    conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        cursor.execute("Select start_time, duration FROM current_auction LIMIT 1")
+        cursor.execute("SELECT start_time, expires_at FROM current_auction LIMIT 1")
         auction = cursor.fetchone()
         if not auction:
             return jsonify({"active": False, "timeLeft": 0}), 200
-        
-        start_time = auction["start_time"]
-        duration = auction["duration"]
 
-        # Calculate remaining time
-        elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
-        remaining = (auction['expires_at'] - elapsed).total_seconds()
+        start_time = ensure_aware_utc(auction.get("start_time"))
+        expires_at = ensure_aware_utc(auction.get("expires_at"))
+
+        if isinstance(start_time, str):
+            try:
+                start_time = datetime.fromisoformat(start_time)
+            except Exception:
+                start_time = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+        if start_time.tzinfo is None:
+            start_time = start_time.replace(tzinfo=timezone.utc)
+
+        remaining = seconds_remaining(expires_at)
+        elapsed= 0
+        if start_time:
+            elapsed = max(0, int((datetime.now(timezone.utc) - start_time).total_seconds()))
 
         return jsonify({
             "active": remaining > 0,
-            "timeLeft": remaining
+            "timeLeft": remaining,
+            "elapsed": int(elapsed)
         }), 200
     finally:
         cursor.close()
@@ -1799,7 +1909,7 @@ def get_current_auction():
             expires_at = datetime.fromisoformat(expires_at)
         if expires_at and expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
-        remaining = max(0, int((expires_at - now).total_seconds())) if expires_at else 0
+        remaining = seconds_remaining(expires_at)
 
         # ✅ Step 4: Get highest bid if exists
         cursor.execute("""
