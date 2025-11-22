@@ -11,7 +11,8 @@ from datetime import datetime, timedelta, timezone
 import mysql.connector
 import pandas as pd
 import bcrypt
-from flask import Flask, jsonify, request, session, send_from_directory
+import socket
+from flask import Flask, jsonify, request, session, send_from_directory, make_response
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_cors import CORS, cross_origin
 from werkzeug.utils import secure_filename
@@ -51,14 +52,26 @@ app.config.update(
     SESSION_TYPE="filesystem"
 )
 
+FRONTEND_PORT = os.environ.get("FRONTEND_PORT", "3000")
+
+# Allow any LAN IP + localhost
+FRONTEND_ORIGINS = [
+    f"http://localhost:{FRONTEND_PORT}",
+    f"http://127.0.0.1:{FRONTEND_PORT}",
+    r"http://192\.168\.\d+\.\d+:{FRONTEND_PORT}",
+    r"http://10\.\d+\.\d+\.\d+:{FRONTEND_PORT}",
+]
+
 # ---- CORS setup ----
-CORS(app, supports_credentials=True, origins=["http://localhost:3000"])
+CORS(app, supports_credentials=True)
 
 # ---- Socket setup ----
 socketio = SocketIO(
     app,
-    cors_allowed_origins=["http://localhost:3000"],
+    cors_allowed_origins="*",
     async_mode="eventlet",
+    logger = True,
+    engineio_logger= True,
     manage_session=False
 )
 
@@ -467,7 +480,7 @@ def mark_sold():
 
         # Insert into sold_players
         cursor.execute("""
-            INSERT INTO sold_players (player_id, team_id, sold_price, session_id, sold_on)
+            INSERT INTO sold_players (player_id, team_id, sold_price, session_id, sold_time)
             VALUES (%s, %s, %s, %s, NOW())
         """, (player_id, team_id, sold_price, session_id))
 
@@ -526,12 +539,12 @@ def pause_auction():
         cursor = conn.cursor(dictionary=True)
 
         # 🟢 Get currently active auction
-        cursor.execute("SELECT player_id, expires_at, paused FROM current_auction LIMIT 1")
+        cursor.execute("SELECT player_id, expires_at, paused, paused_remaining FROM current_auction LIMIT 1")
         auction = cursor.fetchone()
         if not auction:
             return jsonify({'error': 'No active auction found'}), 400
 
-        if auction.get("paused"):
+        if auction["paused"] == 1:
             return jsonify({'error': 'Auction is already paused'}), 400
 
         # 🕒 Calculate remaining time
@@ -741,8 +754,26 @@ def broadcast_auction_update():
         )
 
         # ------------------------
-        # 6) We always include a fresh timestamp for UI animations
+        # 6) Fetch live bid history for notifications
         # ------------------------
+        history = []
+        cursor.execute("""
+            SELECT b.team_id, t.name AS team_name, b.bid_amount, b.bid_time
+            FROM live_bids b
+            JOIN teams t ON b.team_id = t.team_id
+            WHERE b.player_id = %s
+            ORDER BY b.bid_time ASC
+        """, (player_id,))
+        history_raw = cursor.fetchall() or []
+
+        for row in history_raw:
+            history.append({
+                "team_id": row["team_id"],
+                "team_name": row["team_name"],
+                "bid_amount": float(row["bid_amount"]),
+                "bid_time": row["bid_time"].strftime("%Y-%m-%d %H:%M:%S"),
+            })
+
         if highest_safe:
             highest_safe["bid_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -755,8 +786,10 @@ def broadcast_auction_update():
             "time_left": int(time_left),
             "highest_bid": highest_safe,
             "currentBid": current_bid,
-            "server_time": datetime.now(timezone.utc).isoformat()
+            "history": history,   # ✅ history included
+            "server_time": datetime.now(timezone.utc).isoformat(),
         }
+
 
         print(f"📢 Broadcasting auction_update: player={player_id}, "
               f"currentBid={current_bid}, time_left={time_left}, paused={paused}")
@@ -1024,44 +1057,48 @@ def home():
     return "Welcome to JPL Backend!"
 
 # ✅ Login
-@app.route('/login', methods=['POST'])
+@app.route("/login", methods=["POST"])
 def login():
-    data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
-
-    if not email or not password:
-        return jsonify({"error": "Email and password are required"}), 400
+    data = request.json
+    email = data.get("email")
+    password = data.get("password")
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
-    cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
+    cursor.execute("SELECT * FROM users WHERE email=%s", (email,))
     user = cursor.fetchone()
 
-    cursor.close()
-    conn.close()
+    if not user:
+        return jsonify({"error": "User not found"}), 404
 
-    print("DEBUG: user from DB xampp",user)
+    if not bcrypt.checkpw(password.encode(), user["password"].encode()):
+        return jsonify({"error": "Invalid credentials"}), 401
 
-    if user and bcrypt.checkpw(password.encode('utf-8'), user['password'].encode('utf-8')):
-        print("DEBUG: password match success")
-        session['user'] = {
-            'id': user['id'],
-            'email': user['email'],
-            'role': user['role'],
-            'team_id': user.get('team_id')
-        }
+    # ---- WRITE SESSION SAFELY ----
+    session.clear()
+    session["user"] = {
+        "id": user["id"],
+        "email": user["email"],
+        "role": user["role"],
+        "team_id": user.get("team_id"),
+    }
+    session.modified = True
 
-        return jsonify({
-            "message": "Login successful",
-            "user": session['user'],
-            "role": user['role'],
-            "authenticated" : True
-        }), 200
-    else:
-        print("DEBUG: password match FAIL ❌")
-        return jsonify({"error": "Invalid email or password"}), 401
+    # ---- Return response WITH COOKIE ----
+    resp = make_response(jsonify({
+        "authenticated": True,
+        "message": "Login successful",
+        "role": user["role"],
+        "user": session["user"],
+    }))
+
+    # Important for LAN + React
+    resp.headers["Access-Control-Allow-Credentials"] = "true"
+    resp.headers["Access-Control-Allow-Origin"] = "http://192.168.29.135:3000"
+
+    return resp
+
 
 # ✅ Check authentication
 @app.route('/check-auth', methods=['GET'])
@@ -1070,6 +1107,8 @@ def check_auth():
     user = session.get('user')
     if not user:
         return jsonify({"authenticated": False}), 401
+    
+    session.modified = True
 
     role = user.get('role')
 
@@ -1089,7 +1128,7 @@ def check_auth():
         finally:
             cursor.close()
             conn.close()
-
+    print("CHECK-AUTH SESSION:", session)
     print("SESSION USER:", session.get('user'))
     return jsonify({
         "authenticated": True,
@@ -2117,7 +2156,7 @@ def get_current_auction():
             team_balance = float(team["purse"]) if team else 0.0
         print("DEBUG: team_balance =", team_balance)
 
-        # STEP 5: Fetch BID HISTORY  🔥 (with debug logs)
+        # STEP 5: Fetch BID HISTORY 🔥 (with debug logs)
         print("DEBUG: Fetching bid history for player =", player_id)
         cursor.execute("""
             SELECT 
@@ -2125,35 +2164,28 @@ def get_current_auction():
                 t.name AS team_name,
                 b.bid_amount,
                 b.bid_time
-            FROM bids b
+            FROM live_bids b
             JOIN teams t ON b.team_id = t.team_id
             WHERE b.player_id = %s
             ORDER BY b.bid_time ASC
         """, (player_id,))
-        
+
         history_raw = cursor.fetchall() or []
         print("DEBUG: raw history from DB =", history_raw)
-        history = []
 
+        history = []
         for row in history_raw:
-            bt = row.get('bid_time')
+            bt = row.get("bid_time")
             bid_time_str = bt.strftime("%Y-%m-%d %H:%M:%S") if bt else None
 
             history.append({
-                "team_id": row['team_id'],
-                "team_name": row['team_name'],
-                "bid_amount": float(row['bid_amount']),
-                "bid_time": bid_time_str
+                "team_id": row["team_id"],
+                "team_name": row["team_name"],
+                "bid_amount": float(row["bid_amount"]),
+                "bid_time": bid_time_str,
             })
-        
+
         print("DEBUG: Final history list size =", len(history))
-
-
-        if history is None:
-            print("⚠️ WARNING: fetchall() returned None — converting to empty list")
-            history = []
-
-        print(f"DEBUG: Final history list size = {len(history)}")
 
         # RESPONSE
         return jsonify({
@@ -2166,7 +2198,7 @@ def get_current_auction():
                 "type": auction["type"],
                 "image_path": auction["image_path"],
                 "base_price": auction["base_price"],
-                "highest_runs": auction["highest_runs"]
+                "highest_runs": auction["highest_runs"],
             },
             "currentBid": current_bid,
             "highest_bid": safe_json(top_bid) if top_bid else None,
@@ -2176,8 +2208,9 @@ def get_current_auction():
             "nextSteps": [current_bid + 500, current_bid + 1000, current_bid + 1500],
             "paused": paused,
             "canBid": user.get("role") == "team",
-            "history": []
+            "history": history,          # ✅ send actual history
         }), 200
+
 
     except Exception as e:
         print("❌ ERROR in /current-auction:", str(e))
@@ -2244,7 +2277,7 @@ def next_auction():
 
             # Save sold record
             cursor.execute("""
-                INSERT INTO sold_players (player_id, team_id, sold_price, session_id, sold_on)
+                INSERT INTO sold_players (player_id, team_id, sold_price, session_id, sold_time)
                 VALUES (%s, %s, %s, %s, NOW())
             """, (player_id, team_id, sold_price, session_id))
 
