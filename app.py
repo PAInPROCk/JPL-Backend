@@ -52,18 +52,18 @@ app.config.update(
     SESSION_TYPE="filesystem"
 )
 
+# ---- CORS setup ----
 FRONTEND_PORT = os.environ.get("FRONTEND_PORT", "3000")
 
-# Allow any LAN IP + localhost
-FRONTEND_ORIGINS = [
+ALLOWED_ORIGINS = [
     f"http://localhost:{FRONTEND_PORT}",
     f"http://127.0.0.1:{FRONTEND_PORT}",
-    r"http://192\.168\.\d+\.\d+:{FRONTEND_PORT}",
-    r"http://10\.\d+\.\d+\.\d+:{FRONTEND_PORT}",
+    # Regex patterns so ANY 192.168.x.x:3000 machine on LAN is allowed
+    rf"http://192\.168\.\d+\.\d+:{FRONTEND_PORT}",
 ]
 
 # ---- CORS setup ----
-CORS(app, supports_credentials=True)
+CORS(app, supports_credentials=True, origins=ALLOWED_ORIGINS)
 
 # ---- Socket setup ----
 socketio = SocketIO(
