@@ -67,6 +67,14 @@ async def login(request: Request, response: Response):
         "role": FAKE_USER["role"]
     }
 
+@app.post("/logout")
+async def logout(response: Response):
+    response.delete_cookie(
+        key="access_token",
+        samesite="lax",
+        secure=False
+    )
+    return {"message": "Logged out"}
 # ---------------- Models ----------------
 class LoginRequest(BaseModel):
     email: str
