@@ -2,12 +2,20 @@ from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from auth import create_access_token, verify_token
+from socket_server import sio
+from fastapi import FastAPI
+from socket_server import socket_app, sio
+from auction_engine import *
+from auction_state import auction_state
+# from flask_socketio import 
+import socketio
 import mysql.connector
 import bcrypt
 import json
 import os
 
 app = FastAPI()
+app.mount("/socket.io", socket_app)
 
 # ---------------- CORS ----------------
 FRONTEND_PORT = "3000"
@@ -34,6 +42,54 @@ FAKE_USER = {
     "role": "admin"
 }
 
+# MOCK PLAYER (replace with DB later)
+MOCK_PLAYER = {
+    "id": 1,
+    "name": "MS Dhoni",
+    "category": "Wicketkeeper",
+    "type": "Right-hand",
+    "jersey": 7,
+    "base_price": 5000,
+    "image_path": None
+}
+
+# ---------------- SOCKET EVENTS ----------------
+
+@sio.event
+async def connect(sid, environ):
+    print("✅ Connected:", sid)
+
+
+@sio.event
+async def disconnect(sid):
+    print("❌ Disconnected:", sid)
+
+
+@sio.event
+async def join_auction(sid, data):
+    print("👤 Team joined:", data)
+    await emit_update()
+
+
+@sio.event
+async def admin_join(sid, data):
+    print("🛡 Admin joined")
+    await emit_update()
+
+
+@sio.event
+async def place_bid(sid, data):
+    print("💰 Bid attempt:", data)
+
+    team = {
+        "id": data["team_id"],
+        "name": f"Team {data['team_id']}"
+    }
+
+    result = await place_bid(team, data["bid_amount"])
+    return result
+
+# ---------------- REST API ----------------
 
 @app.post("/login")
 async def login(request: Request, response: Response):
@@ -141,3 +197,41 @@ async def check_auth(request: Request):
         "user": payload,
         "role": payload.get("role")
     }
+
+@app.get("/current-auction")
+async def current_auction():
+    if auction_state["status"] == "auction_active":
+        return auction_state
+    return {"status": "idle"}
+
+
+@app.post("/start-auction")
+async def api_start():
+    await start_auction(MOCK_PLAYER)
+    return {"status": "auction_started"}
+
+
+@app.post("/pause-auction")
+async def api_pause():
+    await pause_auction()
+    return {"status": "paused"}
+
+
+@app.post("/resume-auction")
+async def api_resume():
+    await resume_auction()
+    return {"status": "resumed"}
+
+@sio.event
+async def start_auction(sid):
+    session = await sio.get_session(sid)
+    user = session.get("user")
+
+    if user["role"] != "admin":
+        await sio.emit("error", {"msg": "Unauthorized"}, to=sid)
+        return
+
+    await sio.emit("auction_started", {"by": user["email"]})
+
+
+socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
