@@ -2,6 +2,7 @@ import eventlet
 # ---- eventlet must be first ----
 
 # ---- now normal imports ----
+import random
 import threading
 import os
 import io
@@ -843,13 +844,19 @@ def join_auction(data):
 @socketio.on("place_bid")
 def handle_place_bid(data):
     """
-    Socket handler: validates pause, team, purse, increments; writes to live_bids + history.
-    Replies using emit to request.sid on rejections.
+    Socket handler:
+    - validates auth, pause, team, purse, bid increment
+    - enforces ONLY Category A limit (1 per team)
+    - writes to live_bids + bids history
     """
-    # Auth check: ensure session user present and role team
+
+    # --------------------------------------------------
+    # 🔐 AUTH CHECK
+    # --------------------------------------------------
     user = session.get('user')
     if not user:
         return emit("bid_rejected", {"error": "Unauthorized"}, to=request.sid)
+
     if user.get("role") != "team":
         return emit("bid_rejected", {"error": "Only teams can place bids"}, to=request.sid)
 
@@ -864,41 +871,91 @@ def handle_place_bid(data):
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
+
     try:
-        # check current auction and paused flag
+        # --------------------------------------------------
+        # 🟢 CURRENT AUCTION CHECK
+        # --------------------------------------------------
         cursor.execute("SELECT * FROM current_auction LIMIT 1")
         auction = cursor.fetchone()
+
         if not auction:
             return emit("bid_rejected", {"error": "No active auction"}, to=request.sid)
+
         if auction.get("paused"):
-            print("⛔ Bid REJECTED – auction is paused")
             return emit("bid_rejected", {"error": "Auction is paused"}, to=request.sid)
 
-        # ensure client is bidding on active player
         active_player = auction["player_id"]
         if str(player_id) != str(active_player):
             return emit("bid_rejected", {"error": "Invalid player for bidding"}, to=request.sid)
 
-        # team validation and purse (purse column used as live wallet)
-        cursor.execute("SELECT team_id, name, purse FROM teams WHERE team_id = %s", (team_id,))
+        # --------------------------------------------------
+        # 🔒 CATEGORY A LIMIT (ONLY THIS RESTRICTION)
+        # --------------------------------------------------
+        cursor.execute(
+            "SELECT category FROM players WHERE id = %s",
+            (active_player,)
+        )
+        player = cursor.fetchone()
+        player_category = player["category"] if player else None
+
+        if player_category == "A":
+            cursor.execute("""
+                SELECT COUNT(*) AS cnt
+                FROM sold_players sp
+                JOIN players p ON sp.player_id = p.id
+                WHERE sp.team_id = %s
+                  AND p.category = 'A'
+            """, (team_id,))
+
+            already_bought_A = cursor.fetchone()["cnt"]
+
+            if already_bought_A > 0:
+                return emit(
+                    "bid_rejected",
+                    {"error": "You have already purchased a Category A player"},
+                    to=request.sid
+                )
+
+        # --------------------------------------------------
+        # 🏦 TEAM & PURSE CHECK
+        # --------------------------------------------------
+        cursor.execute(
+            "SELECT team_id, name, purse FROM teams WHERE team_id = %s",
+            (team_id,)
+        )
         team = cursor.fetchone()
+
         if not team:
             return emit("bid_rejected", {"error": "Team not found"}, to=request.sid)
+
         if float(team["purse"]) < bid_amount:
             return emit("bid_rejected", {"error": "Insufficient purse"}, to=request.sid)
 
-        # highest live bid
-        cursor.execute("SELECT MAX(bid_amount) AS highest_bid FROM live_bids WHERE player_id = %s", (active_player,))
+        # --------------------------------------------------
+        # 📈 BID INCREMENT VALIDATION
+        # --------------------------------------------------
+        cursor.execute(
+            "SELECT MAX(bid_amount) AS highest_bid FROM live_bids WHERE player_id = %s",
+            (active_player,)
+        )
         row = cursor.fetchone()
-        highest_bid = float(row["highest_bid"]) if row and row["highest_bid"] is not None else 0.0
+        highest_bid = float(row["highest_bid"]) if row and row["highest_bid"] else 0.0
 
         MIN_INCREMENT = 500
-        required = max(highest_bid + MIN_INCREMENT, float(0 if auction.get("base_price") is None else auction.get("base_price")))
+        base_price = float(auction.get("base_price") or 0)
+        required = max(highest_bid + MIN_INCREMENT, base_price)
 
         if bid_amount < required:
-            return emit("bid_rejected", {"error": f"Minimum required bid is ₹{required}"}, to=request.sid)
+            return emit(
+                "bid_rejected",
+                {"error": f"Minimum required bid is ₹{required}"},
+                to=request.sid
+            )
 
-        # Upsert into live_bids so each team has at most one live row per player
+        # --------------------------------------------------
+        # 💾 SAVE LIVE BID + HISTORY
+        # --------------------------------------------------
         cursor.execute("""
             INSERT INTO live_bids (player_id, team_id, bid_amount, bid_time)
             VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
@@ -907,7 +964,6 @@ def handle_place_bid(data):
               bid_time = CURRENT_TIMESTAMP
         """, (active_player, team_id, bid_amount))
 
-        # Append to historical bids table for audit/history
         cursor.execute("""
             INSERT INTO bids (player_id, team_id, bid_amount, bid_time)
             VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
@@ -917,22 +973,36 @@ def handle_place_bid(data):
 
         print(f"💰 Live bid accepted: Team {team_id} → ₹{bid_amount}")
 
-        # notify bidder (ack) and broadcast to all
-        emit("bid_accepted", {"message": "Bid accepted", "team_id": team_id, "bid_amount": float(bid_amount)}, to=request.sid)
+        # --------------------------------------------------
+        # 📢 NOTIFY CLIENTS
+        # --------------------------------------------------
+        emit(
+            "bid_accepted",
+            {
+                "message": "Bid accepted",
+                "team_id": team_id,
+                "bid_amount": float(bid_amount)
+            },
+            to=request.sid
+        )
 
-        socketio.emit("bid_placed", {
-            "team_id": team_id,
-            "team_name": team["name"],
-            "bid_amount": float(bid_amount)
-        }, to=None)
+        socketio.emit(
+            "bid_placed",
+            {
+                "team_id": team_id,
+                "team_name": team["name"],
+                "bid_amount": float(bid_amount)
+            },
+            to=None
+        )
 
-        # update auction board
         broadcast_auction_update()
 
     except Exception as e:
         conn.rollback()
         print("⚠ place_bid error:", e)
         emit("bid_rejected", {"error": str(e)}, to=request.sid)
+
     finally:
         cursor.close()
         conn.close()
@@ -1094,8 +1164,8 @@ def login():
     }))
 
     # Important for LAN + React
-    resp.headers["Access-Control-Allow-Credentials"] = "true"
-    resp.headers["Access-Control-Allow-Origin"] = "http://192.168.29.135:3000"
+    # resp.headers["Access-Control-Allow-Credentials"] = "true"
+    # resp.headers["Access-Control-Allow-Origin"] = "http://192.168.29.135:3000"
 
     return resp
 
@@ -1928,9 +1998,12 @@ def get_player(player_id):
 
 @app.route('/start-auction', methods=['POST'])
 def start_auction():
-    # auth & role
+    # --------------------------------------------------
+    # 🔐 AUTH & ROLE CHECK
+    # --------------------------------------------------
     if 'user' not in session:
         return jsonify({'error': 'Unauthorized', 'status': 'error'}), 401
+
     if session['user'].get('role') != 'admin':
         return jsonify({'error': 'Forbidden', 'status': 'error'}), 403
 
@@ -1940,58 +2013,96 @@ def start_auction():
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
+
     try:
-        # pick player based on mode
+        # --------------------------------------------------
+        # 🎯 PLAYER SELECTION
+        # --------------------------------------------------
         if mode == "manual":
             if not player_id:
                 return jsonify({'error': 'player_id is required for manual mode'}), 400
+
             cursor.execute("SELECT * FROM players WHERE id = %s", (player_id,))
             player = cursor.fetchone()
+
         elif mode == "random":
+            # STEP 1️⃣ Get all remaining categories
             cursor.execute("""
-                SELECT * FROM players
+                SELECT DISTINCT category
+                FROM players
                 WHERE id NOT IN (
                     SELECT player_id FROM sold_players
                     UNION
                     SELECT player_id FROM unsold_players
                 )
-                ORDER BY RAND() LIMIT 1
             """)
+            categories = cursor.fetchall()
+
+            if not categories:
+                return jsonify({'error': 'No players available for auction'}), 404
+
+            # STEP 2️⃣ Pick random category
+            random_category = random.choice(categories)["category"]
+
+            # STEP 3️⃣ Pick random player from that category
+            cursor.execute("""
+                SELECT *
+                FROM players
+                WHERE category = %s
+                  AND id NOT IN (
+                      SELECT player_id FROM sold_players
+                      UNION
+                      SELECT player_id FROM unsold_players
+                  )
+                ORDER BY RAND()
+                LIMIT 1
+            """, (random_category,))
             player = cursor.fetchone()
+
         elif mode == "unsold":
             cursor.execute("""
-                SELECT p.* FROM players p
+                SELECT p.*
+                FROM players p
                 JOIN unsold_players u ON p.id = u.player_id
                 WHERE p.id NOT IN (SELECT player_id FROM sold_players)
-                ORDER BY u.id ASC LIMIT 1
+                ORDER BY u.id ASC
+                LIMIT 1
             """)
             player = cursor.fetchone()
+
         else:
             return jsonify({'error': f'Invalid mode: {mode}'}), 400
 
         if not player:
-            return jsonify({'error': 'No eligible player found for this mode'}), 404
+            return jsonify({'error': 'No eligible player found'}), 404
 
-        player_id = player['id']
+        player_id = player["id"]
 
-        # clear any existing auction rows and live bids (clean start)
+        # --------------------------------------------------
+        # 🧹 CLEAR PREVIOUS AUCTION STATE
+        # --------------------------------------------------
         cursor.execute("DELETE FROM current_auction")
         cursor.execute("DELETE FROM live_bids")
         conn.commit()
 
-        # setup auction timings
+        # --------------------------------------------------
+        # ⏱ AUCTION TIMING SETUP
+        # --------------------------------------------------
         auction_duration = int(data.get('duration', 120))
         start_time = datetime.now(timezone.utc)
         expires_at = start_time + timedelta(seconds=auction_duration)
         session_id = session.get('session_id', 'default')
 
         cursor.execute("""
-            INSERT INTO current_auction (player_id, start_time, expires_at, auction_duration, mode, session_id)
+            INSERT INTO current_auction
+            (player_id, start_time, expires_at, auction_duration, mode, session_id)
             VALUES (%s, %s, %s, %s, %s, %s)
         """, (player_id, start_time, expires_at, auction_duration, mode, session_id))
         conn.commit()
 
-        # emit initial timer + auction_started
+        # --------------------------------------------------
+        # 📢 SOCKET EVENTS
+        # --------------------------------------------------
         socketio.emit("timer_update", safe_json({
             "remaining_seconds": auction_duration,
             "server_time": datetime.now(timezone.utc).isoformat()
@@ -1999,20 +2110,31 @@ def start_auction():
 
         socketio.emit("auction_started", safe_json({
             "player_id": player_id,
-            "player_name": player.get('name'),
+            "player_name": player.get("name"),
+            "category": player.get("category"),
             "mode": mode,
             "duration": auction_duration,
             "expires_at": expires_at.isoformat()
         }), to=None)
 
-        # start background timer
-        socketio.start_background_task(background_timer, player_id, expires_at, mode, session_id)
+        socketio.start_background_task(
+            background_timer,
+            player_id,
+            expires_at,
+            mode,
+            session_id
+        )
 
-        print(f"🚀 Auction started for {player.get('name')} (mode={mode})")
+        print(
+            f"🚀 Auction started for {player.get('name')} "
+            f"(category={player.get('category')}, mode={mode})"
+        )
+
         return jsonify({
-            "message": f"Auction started for {player.get('name')} in {mode} mode",
+            "message": f"Auction started for {player.get('name')}",
             "player_id": player_id,
-            "player_name": player.get('name'),
+            "player_name": player.get("name"),
+            "category": player.get("category"),
             "mode": mode,
             "start_time": start_time.isoformat(),
             "expires_at": expires_at.isoformat(),
@@ -2024,6 +2146,7 @@ def start_auction():
         conn.rollback()
         print("❌ Error in /start-auction:", e)
         return jsonify({'error': str(e), 'status': 'error'}), 500
+
     finally:
         cursor.close()
         conn.close()
