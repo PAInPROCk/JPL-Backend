@@ -1,9 +1,7 @@
-from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi import FastAPI, Request, Response, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from auth import create_access_token, verify_token
-from socket_server import sio
-from fastapi import FastAPI
 from socket_server import socket_app, sio
 from auction_engine import *
 from auction_state import auction_state
@@ -14,8 +12,22 @@ import bcrypt
 import json
 import os
 
+# ---------------- Models ----------------
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
 app = FastAPI()
-app.mount("/socket.io", socket_app)
+
+
+# ✅ Database connection
+def get_db_connection():
+    return mysql.connector.connect(
+        host="localhost",
+        user="root",
+        password="",   # XAMPP default (empty) – change if you set a password
+        database="jpl"
+    )
 
 # ---------------- CORS ----------------
 FRONTEND_PORT = "3000"
@@ -28,7 +40,7 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -92,10 +104,10 @@ async def place_bid(sid, data):
 # ---------------- REST API ----------------
 
 @app.post("/login")
-async def login(request: Request, response: Response):
-    data = await request.json()
-    email = data.get("email")
-    password = data.get("password")
+async def login(data: LoginRequest, response: Response):
+
+    email = data.email
+    password = data.password
 
     if email != FAKE_USER["email"]:
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -131,10 +143,7 @@ async def logout(response: Response):
         secure=False
     )
     return {"message": "Logged out"}
-# ---------------- Models ----------------
-class LoginRequest(BaseModel):
-    email: str
-    password: str
+
 
 # # ---------------- LOGIN ----------------
 # @app.post("/login")
@@ -182,6 +191,20 @@ class LoginRequest(BaseModel):
 #     }
 
 # ---------------- CHECK AUTH ----------------
+def get_current_user(request: Request):
+    token = request.cookies.get("access_token")
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    payload = verify_token(token)
+
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    return payload
+
+
 @app.get("/check-auth")
 async def check_auth(request: Request):
     token = request.cookies.get("access_token")
@@ -197,6 +220,148 @@ async def check_auth(request: Request):
         "user": payload,
         "role": payload.get("role")
     }
+
+@app.get("/db-test")
+async def db_test():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT 1")
+    cursor.fetchone()
+
+    cursor.close()
+    conn.close()
+
+    return {"db": "connected"}
+
+
+@app.get("/players")
+async def get_players(user=Depends(get_current_user)):
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT 
+            p.id AS player_id, 
+            p.name, 
+            p.nickname, 
+            p.jersey, 
+            p.category, 
+            p.type,
+            p.image_path, 
+            p.base_price, 
+            p.total_runs, 
+            p.highest_runs, 
+            p.wickets_taken, 
+            p.times_out, 
+            GROUP_CONCAT(t.name SEPARATOR ', ') AS teams_played
+        FROM players p
+        LEFT JOIN player_teams pt ON p.id = pt.player_id
+        LEFT JOIN teams t ON pt.team_id = t.team_id   -- ✅ FIXED HERE
+        GROUP BY p.id
+        ORDER BY p.name ASC
+    """)
+    rows = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    return {
+        "success": True,
+        "count": len(rows),
+        "players": rows
+    }
+
+@app.get("/players-with-teams")
+async def players_with_teams(user=Depends(get_current_user)):
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT 
+            p.id AS player_id,
+            p.name,
+            p.nickname,
+            p.jersey,
+            p.category,
+            p.type,
+            p.image_path,
+            p.base_price,
+            GROUP_CONCAT(t.name SEPARATOR ', ') AS teams_played
+        FROM players p
+        LEFT JOIN player_teams pt ON p.id = pt.player_id
+        LEFT JOIN teams t ON pt.team_id = t.team_id
+        GROUP BY p.id
+        ORDER BY p.name ASC
+    """)
+
+    rows = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    return rows
+
+@app.get("/teams")
+async def get_teams(user=Depends(get_current_user)):
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute("SELECT * FROM teams")
+    rows = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    return {
+    "success": True,
+    "count": len(rows),
+    "teams": rows
+    }
+
+@app.get("/team/{team_id}")
+async def get_team_by_id(
+    team_id: int,
+    user=Depends(get_current_user)
+):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        # ✅ Get team
+        cursor.execute(
+            "SELECT * FROM teams WHERE team_id = %s",
+            (team_id,)
+        )
+        team = cursor.fetchone()
+
+        if not team:
+            raise HTTPException(
+                status_code=404,
+                detail="Team not found"
+            )
+
+        # ✅ Get sold players (OLD APP LOGIC)
+        cursor.execute("""
+            SELECT p.*, sp.sold_price, sp.sold_time
+            FROM sold_players sp
+            JOIN players p ON sp.player_id = p.id
+            WHERE sp.team_id = %s
+        """, (team_id,))
+
+        sold_players = cursor.fetchall()
+
+        return {
+            "team": team,
+            "sold_players": sold_players
+        }
+
+    finally:
+        cursor.close()
+        conn.close()
 
 @app.get("/current-auction")
 async def current_auction():
@@ -232,6 +397,38 @@ async def start_auction(sid):
         return
 
     await sio.emit("auction_started", {"by": user["email"]})
+
+# MOCK PLAYERS LIST (temporary until DB added)
+MOCK_PLAYERS = [
+    {
+        "id": 1,
+        "name": "MS Dhoni",
+        "category": "Wicketkeeper",
+        "type": "Right-hand",
+        "base_price": 5000
+    },
+    {
+        "id": 2,
+        "name": "Virat Kohli",
+        "category": "Batsman",
+        "type": "Right-hand",
+        "base_price": 6000
+    }
+]
+
+# MOCK TEAMS LIST
+MOCK_TEAMS = [
+    {
+        "team_id": 1,
+        "name": "Mumbai Warriors",
+        "purse": 500000
+    },
+    {
+        "team_id": 2,
+        "name": "Delhi Titans",
+        "purse": 480000
+    }
+]
 
 
 socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
