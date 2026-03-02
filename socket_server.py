@@ -3,7 +3,7 @@ from socket_manager import sio
 from auth import verify_token
 from auction_engine import (
     auction_state,
-    place_bid as engine_place_bid
+    engine_place_bid
 )
 
 
@@ -22,19 +22,7 @@ connected_teams = set()
 
 @sio.event
 async def connect(sid, environ):
-    user = await get_user_from_cookie(environ)
-
-    if not user:
-        print("❌ Socket rejected: unauthenticated")
-        return False
-
-    await sio.save_session(sid, {"user": user})
-    print(f"✅ Socket connected: {user['email']} ({user['role']})")
-
-    if user["role"] == "admin":
-        connected_admins.add(sid)
-    else:
-        connected_teams.add(sid)
+    print("✅ Socket connected:", sid)
 
 @sio.event
 async def disconnect(sid):

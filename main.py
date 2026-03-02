@@ -1,31 +1,24 @@
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from team_state import team_wallets
 from auth import create_access_token, verify_token
-from socket_server import sio
-from fastapi import FastAPI
 from socket_server import socket_app, sio
-from auction_engine import *
+from auction_engine import (
+    start_auction,
+    pause_auction,
+    resume_auction,
+    end_auction,
+    emit_update,
+    engine_place_bid
+)
 from auction_state import auction_state
-# from flask_socketio import 
+
 import socketio
-import mysql.connector
 import bcrypt
-import json
-import os
 
 app = FastAPI()
-app.mount("/socket.io", socket_app)
 
 # ---------------- CORS ----------------
-FRONTEND_PORT = "3000"
-
-origins = [
-    f"http://localhost:{FRONTEND_PORT}",
-    f"http://127.0.0.1:{FRONTEND_PORT}",
-    "http://192.168.29.135:3000",
-]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -34,15 +27,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MOCK: replace with DB
-FAKE_USER = {
-    "id": 1,
-    "email": "admin1@example.com",
-    "password": bcrypt.hashpw(b"admin123", bcrypt.gensalt()).decode(),
-    "role": "admin"
+# ---------------- MOCK DATA ----------------
+FAKE_USERS = {
+    "admin1@example.com": {
+        "id": 1,
+        "email": "admin1@example.com",
+        "password": bcrypt.hashpw(b"admin123", bcrypt.gensalt()).decode(),
+        "role": "admin",
+        "team_id": None,
+        "team_name": None,
+    },
+
+    "team1@example.com": {
+        "id": 2,
+        "email": "team1@example.com",
+        "password": bcrypt.hashpw(b"team123", bcrypt.gensalt()).decode(),
+        "role": "team",
+        "team_id": 101,
+        "team_name": "Mumbai Warriors",
+    },
+
+    "team2@example.com": {
+        "id": 3,
+        "email": "team2@example.com",
+        "password": bcrypt.hashpw(b"team123", bcrypt.gensalt()).decode(),
+        "role": "team",
+        "team_id": 102,
+        "team_name": "Delhi Titans",
+    }
 }
 
-# MOCK PLAYER (replace with DB later)
 MOCK_PLAYER = {
     "id": 1,
     "name": "MS Dhoni",
@@ -59,26 +73,40 @@ MOCK_PLAYER = {
 async def connect(sid, environ):
     print("✅ Connected:", sid)
 
-
 @sio.event
 async def disconnect(sid):
     print("❌ Disconnected:", sid)
 
-
 @sio.event
 async def join_auction(sid, data):
+    team_id = data["team_id"]
+
+    # 🔥 Save wallet properly
+    team_wallets[team_id] = {
+        "team_name": data["team_name"],
+        "purse": data.get("purse", 50000)  # default test purse
+    }
+
+
+    await sio.save_session(sid, {
+        "user": {
+            "team_id": data["team_id"],
+            "team_name": data["team_name"],
+            "role": "team"
+        }
+    })
+
     print("👤 Team joined:", data)
     await emit_update()
-
 
 @sio.event
 async def admin_join(sid, data):
     print("🛡 Admin joined")
     await emit_update()
 
-
 @sio.event
 async def place_bid(sid, data):
+
     print("💰 Bid attempt:", data)
 
     team = {
@@ -86,27 +114,33 @@ async def place_bid(sid, data):
         "name": f"Team {data['team_id']}"
     }
 
-    result = await place_bid(team, data["bid_amount"])
+    result = await engine_place_bid(team, data["bid_amount"])
+
     return result
 
 # ---------------- REST API ----------------
 
 @app.post("/login")
 async def login(request: Request, response: Response):
+
     data = await request.json()
     email = data.get("email")
     password = data.get("password")
 
-    if email != FAKE_USER["email"]:
+    user = FAKE_USERS.get(email)
+
+    if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    if not bcrypt.checkpw(password.encode(), FAKE_USER["password"].encode()):
+    if not bcrypt.checkpw(password.encode(), user["password"].encode()):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = create_access_token({
-        "id": FAKE_USER["id"],
-        "email": FAKE_USER["email"],
-        "role": FAKE_USER["role"],
+        "id": user["id"],
+        "email": user["email"],
+        "role": user["role"],
+        "team_id": user["team_id"],
+        "team_name": user["team_name"],
     })
 
     response.set_cookie(
@@ -120,75 +154,25 @@ async def login(request: Request, response: Response):
 
     return {
         "authenticated": True,
-        "role": FAKE_USER["role"]
+        "role": user["role"]
     }
+
 
 @app.post("/logout")
 async def logout(response: Response):
-    response.delete_cookie(
-        key="access_token",
-        samesite="lax",
-        secure=False
-    )
+    response.delete_cookie(key="access_token")
     return {"message": "Logged out"}
-# ---------------- Models ----------------
-class LoginRequest(BaseModel):
-    email: str
-    password: str
 
-# # ---------------- LOGIN ----------------
-# @app.post("/login")
-# def login(data: LoginRequest, response: Response):
-#     email = data.email
-#     password = data.password
 
-#     conn = get_db_connection()
-#     cursor = conn.cursor(dictionary=True)
-
-#     cursor.execute("SELECT * FROM users WHERE email=%s", (email,))
-#     user = cursor.fetchone()
-
-#     cursor.close()
-#     conn.close()
-
-#     if not user:
-#         raise HTTPException(status_code=404, detail="User not found")
-
-#     if not bcrypt.checkpw(password.encode(), user["password"].encode()):
-#         raise HTTPException(status_code=401, detail="Invalid credentials")
-
-#     # ---- Build session-like user object ----
-#     session_user = {
-#         "id": user["id"],
-#         "email": user["email"],
-#         "role": user["role"],
-#         "team_id": user.get("team_id"),
-#     }
-
-#     # ---- Store in cookie (HTTP-only) ----
-#     response.set_cookie(
-#         key="user",
-#         value=json.dumps(session_user),
-#         httponly=True,
-#         samesite="lax",
-#         max_age=60 * 60 * 2
-#     )
-
-#     return {
-#         "authenticated": True,
-#         "message": "Login successful",
-#         "role": user["role"],
-#         "user": session_user
-#     }
-
-# ---------------- CHECK AUTH ----------------
 @app.get("/check-auth")
 async def check_auth(request: Request):
     token = request.cookies.get("access_token")
+
     if not token:
         return {"authenticated": False}
 
     payload = verify_token(token)
+
     if not payload:
         return {"authenticated": False}
 
@@ -198,40 +182,65 @@ async def check_auth(request: Request):
         "role": payload.get("role")
     }
 
+
 @app.get("/current-auction")
 async def current_auction():
     if auction_state["status"] == "auction_active":
         return auction_state
     return {"status": "idle"}
 
+@app.get("/auction-status")
+async def auction_status():
+    return {
+        "active": auction_state["status"] == "auction_active"
+    }
 
 @app.post("/start-auction")
 async def api_start():
+    print("🚀 Auction started")
     await start_auction(MOCK_PLAYER)
     return {"status": "auction_started"}
 
 
 @app.post("/pause-auction")
 async def api_pause():
+    print("⏸ Auction paused")
     await pause_auction()
     return {"status": "paused"}
 
 
 @app.post("/resume-auction")
 async def api_resume():
+    print("▶ Auction resumed")
     await resume_auction()
     return {"status": "resumed"}
 
-@sio.event
-async def start_auction(sid):
-    session = await sio.get_session(sid)
-    user = session.get("user")
 
-    if user["role"] != "admin":
-        await sio.emit("error", {"msg": "Unauthorized"}, to=sid)
-        return
+@app.post("/mark-sold")
+async def api_mark_sold():
 
-    await sio.emit("auction_started", {"by": user["email"]})
+    if auction_state["status"] != "auction_active":
+        return {"error": "No active auction"}
+
+    if not auction_state["highest_bid"]:
+        return {"error": "No bids available"}
+
+    print("✅ Admin manually SOLD player")
+
+    await end_auction()
+
+    return {"success": True}
 
 
+@app.post("/next-auction")
+async def api_next_player():
+
+    print("➡ Admin moving to next player")
+
+    await start_auction(MOCK_PLAYER)
+
+    return {"status": "auction_moved"}
+
+
+# ---------------- ASGI APP ----------------
 socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
