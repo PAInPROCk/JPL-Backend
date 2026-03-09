@@ -78,5 +78,3 @@ async def place_bid(sid, data):
         return result
 
     return {"success": True}
-
-socket_app = socketio.ASGIApp(sio)
