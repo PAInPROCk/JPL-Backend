@@ -7,10 +7,14 @@ from core.database import get_db_connection
 from fastapi.concurrency import run_in_threadpool
 from auth.auth_routes import router as auth_router
 from routers.players import router as players_router
+from routers.teams import router as teams_router
+from routers.auction_routes import router as auction_router
 #Create FastAPI app
 app =  FastAPI()
 app.include_router(auth_router)
 app.include_router(players_router)
+app.include_router(teams_router)
+app.include_router(auction_router)
 #CORS Setup for frontend and Backend connectivity
 
 
