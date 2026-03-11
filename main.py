@@ -17,10 +17,13 @@ app.include_router(teams_router)
 app.include_router(auction_router)
 #CORS Setup for frontend and Backend connectivity
 
-
+origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000"
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins= "*",
+    allow_origins= origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
