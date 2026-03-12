@@ -4,6 +4,7 @@ from core.database import get_db_connection
 import pymysql
 from auth.auth_handler import verify_token
 
+
 MIN_INCREAMENT = 500
 
 bid_lock = asyncio.Lock()
@@ -17,6 +18,69 @@ def register_socket_events():
     async def disconnect(sid):
         print("❌ Socket Disconnected:", sid)
 
+@sio.event
+async def join_auction(sid):
+    print(f"📡 Client joined auction: {sid}")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+
+    try:
+        cursor.execute("""
+            SELECT
+                ca.player_id,
+                ca.expires_at,
+                ca.auction_duration,
+                p.name,
+                p.image_path,
+                p.base_price
+            FROM current_auction ca
+            JOIN players p ON ca.player_id = p.id
+            LIMIT 1
+        """)
+
+        auction = cursor.fetchone()
+
+        if not auction:
+            await sio.emit(
+                "auction_state",
+                {"status":"no_ative_auction"},
+                to = sid
+            )
+            return
+        
+        #Fetch highest bid
+        cursor.execute("""
+            SELECT b.team_id,t.name AS team_name, b.bid_amount
+            FROM live_bids b
+            JOIN teams t ON b.team_id = t.team_id
+            WHERE b.player_id = %s
+            ORDER BY b.bid_amount DESC
+            LIMIT 1
+        """, (auction["player_id"],))
+
+        top_bid = cursor.fetchone()
+
+        await sio.emit(
+            "auction_status",
+            {
+                "status": "auction_active",
+                "player": {
+                    "id": auction["player_id"],
+                    "name": auction["name"],
+                    "image_path": auction["image_path"],
+                    "base_price": float(auction["base_price"])
+                },
+                "highest_bid": top_bid
+            },
+            to= sid
+        )
+    except Exception as e:
+        print("❌ join_auction error: ", e)
+    finally:
+        cursor.close()
+        conn.close()
+        
 @sio.event
 async def place_bid(sid, data):
     async with bid_lock:
