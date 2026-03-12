@@ -1,11 +1,12 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import pymysql
 
 from core.database import get_db_connection
 from sockets.socket_manager import sio
 
 async def background_timer(player_id, expires_at, mode, session_id):
+
     print(f"⏰ Timer started for player {player_id}")
 
     while True:
@@ -28,57 +29,48 @@ async def background_timer(player_id, expires_at, mode, session_id):
     cursor = conn.cursor(pymysql.cursors.DictCursor)
 
     try:
-        #Lock Auction row
+
         cursor.execute(
             "SELECT * FROM current_auction WHERE player_id=%s FOR UPDATE",
             (player_id,)
         )
+
         auction = cursor.fetchone()
 
         if not auction:
             return
-        
-        # Top Bid
+
+        # highest bid
         cursor.execute("""
-                SELECT b.team_id, b.bid_amount, t.name AS team_name
-                FROM live_bids b
-                JOIN teams t ON b.team_id = t.team_id
-                WHERE b.player_id = %s
-                ORDER BY b.bid_amount DESC
-                LIMIT 1
-            """, (player_id))
-        
+        SELECT b.team_id, b.bid_amount, t.name AS team_name
+        FROM live_bids b
+        JOIN teams t ON b.team_id = t.team_id
+        WHERE b.player_id = %s
+        ORDER BY b.bid_amount DESC
+        LIMIT 1
+        """, (player_id,))
+
         top_bid = cursor.fetchone()
 
         if top_bid:
-            #Deduct purse
-            cursor.execute("""
-                UPDATE teams
-                SET purse = purse - %s
-                WHERE team_id = %s
-            """, (top_bid["bid_amount", top_bid["team_id"]]))
 
             cursor.execute("""
-                INSERT INTO sold_players
-                (player_id, team_id, sold_price, sold_time)
-                VALUES (%s, %s, %s, NOW())
-            """,(
+            UPDATE teams
+            SET purse = purse - %s
+            WHERE team_id = %s
+            """, (top_bid["bid_amount"], top_bid["team_id"]))
+
+            cursor.execute("""
+            INSERT INTO sold_players
+            (player_id, team_id, sold_price, sold_time)
+            VALUES (%s,%s,%s,NOW())
+            """, (
                 player_id,
                 top_bid["team_id"],
                 top_bid["bid_amount"]
             ))
 
-            cursor.execute(
-                "DELETE FROM current_auction WHERE player_id = %s",
-                (player_id,)
-            )
-
-            cursor.execute(
-                "DELETE FROM live_bids WHERE player_id = %s",
-                (player_id,)
-            )
-
-            conn.commit()
+            status = "sold"
 
             await sio.emit("auction_ended", {
                 "status": "sold",
@@ -87,30 +79,95 @@ async def background_timer(player_id, expires_at, mode, session_id):
                 "team_name": top_bid["team_name"],
                 "bid_amount": float(top_bid["bid_amount"])
             })
+
         else:
 
-            cursor.execute(
-                "DELETE FROM current_auction WHERE player_id = %s",
-                (player_id,)
-            )
-
             cursor.execute("""
-                INSERT INTO unsold_players
-                (player_id, reason, added_on)
-                VALUES (%s, %s, NOW())
-            """,(
-                player_id,
-                "No Bids"
-            ))
+            INSERT INTO unsold_players
+            (player_id, reason, added_on)
+            VALUES (%s,%s,NOW())
+            """, (player_id, "No Bids"))
 
-            conn.commit()
+            status = "unsold"
 
-            await sio.emit("auction_ended",{
+            await sio.emit("auction_ended", {
                 "status": "unsold",
                 "player_id": player_id
             })
+
+        cursor.execute("DELETE FROM current_auction WHERE player_id=%s", (player_id,))
+        cursor.execute("DELETE FROM live_bids WHERE player_id=%s", (player_id,))
+
+        conn.commit()
+
     finally:
         cursor.close()
         conn.close()
 
-    print(f"🏁 Timer finished for player {player_id}")
+    print("⏳ Waiting 15 seconds before next player")
+    await asyncio.sleep(15)
+
+    # select next player
+    conn = get_db_connection()
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+
+    try:
+
+        cursor.execute("""
+        SELECT * FROM players
+        WHERE id NOT IN (
+            SELECT player_id FROM sold_players
+            UNION
+            SELECT player_id FROM unsold_players
+        )
+        ORDER BY RAND()
+        LIMIT 1
+        """)
+
+        next_player = cursor.fetchone()
+
+        if not next_player:
+            print("🏁 Auction finished")
+            await sio.emit("auction_finished", {})
+            return
+
+        start_time = datetime.now(timezone.utc)
+        duration = 120
+        expires_at = start_time + timedelta(seconds=duration)
+
+        cursor.execute("""
+        INSERT INTO current_auction
+        (player_id,start_time,expires_at,auction_duration,mode)
+        VALUES (%s,%s,%s,%s,%s)
+        """, (
+            next_player["id"],
+            start_time,
+            expires_at,
+            duration,
+            mode
+        ))
+
+        conn.commit()
+
+        await sio.emit("auction_started", {
+            "player_id": next_player["id"],
+            "player_name": next_player["name"],
+            "mode": mode,
+            "duration": duration,
+            "expires_at": expires_at.isoformat()
+        })
+
+        asyncio.create_task(
+            background_timer(
+                next_player["id"],
+                expires_at,
+                mode,
+                session_id
+            )
+        )
+
+        print(f"🚀 Next auction started for {next_player['name']}")
+
+    finally:
+        cursor.close()
+        conn.close()

@@ -13,137 +13,154 @@ router = APIRouter()
 
 @router.post("/start-auction")
 async def start_auction(data: StartAuctionRequest, request: Request):
-    #-------------- AUTH CHECK ---------------
+
     token = request.cookies.get("access_token")
 
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    
+
     payload = verify_token(token)
 
     if not payload or payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Forbidden")
-    
+
     mode = data.mode
+    duration = data.duration or 40
     player_id = data.player_id
-    duration = data.duration
 
     conn = get_db_connection()
 
     if conn is None:
-        raise HTTPException(status_code=500, detail="Database connection failed")
-    
-    try:
-        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        raise HTTPException(500, "Database connection failed")
 
-        #------------ SELECT PLAYER --------------
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+
+    try:
+
+        # 🚫 prevent double auction
+        cursor.execute("SELECT * FROM current_auction LIMIT 1")
+        if cursor.fetchone():
+            raise HTTPException(400, "Auction already running")
+
+        # -------- SELECT PLAYER --------
+
         if mode == "manual":
+
             if not player_id:
-                raise HTTPException(status_code=400, detail="player_id required")
-            
+                raise HTTPException(400, "player_id required")
+
             cursor.execute(
-                "SELECT * FROM players WHERE id=%s",(player_id,)
+                "SELECT * FROM players WHERE id=%s",
+                (player_id,)
             )
 
             player = cursor.fetchone()
 
         elif mode == "random":
+
             cursor.execute("""
-                    SELECT * FROM players
-                    WHERE id NOT IN (
-                            SELECT player_id FROM sold_players
-                            UNION 
-                            SELECT player_id FROM unsold_players
-                        )
-                        ORDER BY RAND()
-                        LIMIT 1
-                """)
+                SELECT * FROM players
+                WHERE id NOT IN (
+                    SELECT player_id FROM sold_players
+                    UNION
+                    SELECT player_id FROM unsold_players
+                )
+                ORDER BY RAND()
+                LIMIT 1
+            """)
+
             player = cursor.fetchone()
 
         elif mode == "unsold":
+
             cursor.execute("""
-                    SELECT p.*
-                    FROM players p
-                    JOIN unsold_players u ON p.id = u.player_id
-                    WHERE p.id NOT IN (SELECT player_id FROM sold_players)
-                    ORDER BY u.id ASC
-                    LIMIT 1
-                """)
+                SELECT p.*
+                FROM players p
+                JOIN unsold_players u ON p.id = u.player_id
+                WHERE p.id NOT IN (
+                    SELECT player_id FROM sold_players
+                )
+                ORDER BY u.id ASC
+                LIMIT 1
+            """)
+
             player = cursor.fetchone()
 
         else:
-            raise HTTPException(status_code=400, detail="Invalid mode")
-        
+            raise HTTPException(400, "Invalid mode")
+
         if not player:
-            raise HTTPException(status_code=404, detail="No eligible player found")
-        
+            raise HTTPException(404, "No eligible player found")
+
         player_id = player["id"]
 
-        #-------------- RESET AUCTION TABLES --------------
+        # -------- RESET TABLES --------
+
         cursor.execute("DELETE FROM current_auction")
         cursor.execute("DELETE FROM live_bids")
 
-        conn.commit()
+        # -------- INSERT CURRENT AUCTION --------
 
-        #-------------- SET AUCTION TIMER --------------
         start_time = datetime.now(timezone.utc)
         expires_at = start_time + timedelta(seconds=duration)
 
         cursor.execute("""
-                INSERT INTO current_auction
-                (player_id, start_time, expires_at, auction_duration, mode)
-                VALUES (%s, %s, %s, %s, %s)
-            """,(
-                player_id,
-                start_time,
-                expires_at,
-                duration,
-                mode
-            ))
-        
+            INSERT INTO current_auction
+            (player_id, start_time, expires_at, auction_duration, mode)
+            VALUES (%s,%s,%s,%s,%s)
+        """, (
+            player_id,
+            start_time,
+            expires_at,
+            duration,
+            mode
+        ))
+
         conn.commit()
 
-        #----------------- EMIT SOCKET EVENTS ------------------
+        # -------- SOCKET EVENTS --------
+
         await sio.emit("timer_update", {
             "remaining_seconds": duration,
-            "server_time": datetime.now(timezone.utc).isoformat()
+            "server_time": start_time.isoformat()
         })
 
         await sio.emit("auction_started", {
             "player_id": player_id,
             "player_name": player["name"],
-            "mode":mode,
+            "mode": mode,
             "duration": duration,
             "expires_at": expires_at.isoformat()
         })
 
+        # -------- START TIMER --------
+
         asyncio.create_task(
-            background_timer(player_id, expires_at, mode, payload.get("session_id"))
+            background_timer(
+                player_id,
+                expires_at,
+                mode,
+                payload.get("session_id")
+            )
         )
-        
+
         print(f"🚀 Auction started for {player['name']}")
 
-        return{
-            "message": f"Auction Started for {player['name']}",
+        return {
+            "status": "auction_started",
             "player_id": player_id,
             "player_name": player["name"],
-            "mode": mode,
             "duration": duration,
-            "expires_at": expires_at.isoformat(),
-            "status": "auction_started"
+            "expires_at": expires_at.isoformat()
         }
-    
+
     except Exception as e:
         conn.rollback()
-        print("Auction start error: ", e)
-        raise HTTPException(status_code=500, detail=str(e))
-    
-    finally:
-        if cursor:
-            cursor.close()
+        raise HTTPException(500, str(e))
 
-        if conn:
-            conn.close()
+    finally:
+        cursor.close()
+        conn.close()
 
 
 def seconds_remaining(expires_at):
