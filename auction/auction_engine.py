@@ -10,8 +10,49 @@ async def background_timer(player_id, expires_at, mode, session_id):
     print(f"⏰ Timer started for player {player_id}")
 
     while True:
+
+        conn = get_db_connection()
+        cursor = conn.cursor(pymysql.cursors.DictCursor)
+
+        try:
+            cursor.execute(
+                "SELECT paused, paused_remaining, expires_at FROM current_auction WHERE player_id=%s",
+                (player_id,)
+            )
+
+            state = cursor.fetchone()
+
+        finally:
+            cursor.close()
+            conn.close()
+
+        if not state:
+            print("⚠ Auction row missing — stopping timer")
+            return
+
+        # ---------------- PAUSED ----------------
+        if state["paused"]:
+
+            await sio.emit("auction_paused", {
+                "paused": True,
+                "remaining_seconds": state["paused_remaining"]
+            })
+
+            await asyncio.sleep(1)
+            continue
+
+        # ---------------- NORMAL TIMER ----------------
         now = datetime.now(timezone.utc)
-        remaining = int((expires_at - now).total_seconds())
+
+        db_expires = state["expires_at"]
+
+        if isinstance(db_expires, str):
+            db_expires = datetime.fromisoformat(db_expires)
+
+        if db_expires.tzinfo is None:
+            db_expires = db_expires.replace(tzinfo=timezone.utc)
+
+        remaining = int((db_expires - now).total_seconds())
 
         if remaining <= 0:
             break
@@ -40,7 +81,7 @@ async def background_timer(player_id, expires_at, mode, session_id):
         if not auction:
             return
 
-        # highest bid
+        # ---------------- HIGHEST BID ----------------
         cursor.execute("""
         SELECT b.team_id, b.bid_amount, t.name AS team_name
         FROM live_bids b
@@ -70,8 +111,6 @@ async def background_timer(player_id, expires_at, mode, session_id):
                 top_bid["bid_amount"]
             ))
 
-            status = "sold"
-
             await sio.emit("auction_ended", {
                 "status": "sold",
                 "player_id": player_id,
@@ -80,6 +119,9 @@ async def background_timer(player_id, expires_at, mode, session_id):
                 "bid_amount": float(top_bid["bid_amount"])
             })
 
+            await sio.emit("next_player_loading", {
+                "delay": 10
+            })
         else:
 
             cursor.execute("""
@@ -88,11 +130,13 @@ async def background_timer(player_id, expires_at, mode, session_id):
             VALUES (%s,%s,NOW())
             """, (player_id, "No Bids"))
 
-            status = "unsold"
-
             await sio.emit("auction_ended", {
                 "status": "unsold",
                 "player_id": player_id
+            })
+
+            await sio.emit("next_player_loading", {
+                "delay": 10
             })
 
         cursor.execute("DELETE FROM current_auction WHERE player_id=%s", (player_id,))
@@ -104,10 +148,10 @@ async def background_timer(player_id, expires_at, mode, session_id):
         cursor.close()
         conn.close()
 
-    print("⏳ Waiting 15 seconds before next player")
-    await asyncio.sleep(15)
+    # ---------------- DELAY BEFORE NEXT PLAYER ----------------
+    print("⏳ Waiting 10 seconds before next player")
+    await asyncio.sleep(10)
 
-    # select next player
     conn = get_db_connection()
     cursor = conn.cursor(pymysql.cursors.DictCursor)
 
