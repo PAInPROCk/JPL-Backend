@@ -21,6 +21,7 @@ async def background_timer(player_id, expires_at, mode, session_id):
             )
 
             state = cursor.fetchone()
+            print("PAUSE STATE:", state["paused"])
 
         finally:
             cursor.close()
@@ -32,12 +33,6 @@ async def background_timer(player_id, expires_at, mode, session_id):
 
         # ---------------- PAUSED ----------------
         if state["paused"]:
-
-            await sio.emit("auction_paused", {
-                "paused": True,
-                "remaining_seconds": state["paused_remaining"]
-            })
-
             await asyncio.sleep(1)
             continue
 
@@ -52,7 +47,7 @@ async def background_timer(player_id, expires_at, mode, session_id):
         if db_expires.tzinfo is None:
             db_expires = db_expires.replace(tzinfo=timezone.utc)
 
-        remaining = int((db_expires - now).total_seconds())
+        remaining = max(0, int((db_expires - now).total_seconds()))
 
         if remaining <= 0:
             break

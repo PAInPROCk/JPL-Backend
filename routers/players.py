@@ -1,8 +1,15 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, UploadFile, File, HTTPException, Request
+from auth.auth_handler import verify_token
 from core.database import get_db_connection
 import pymysql
+import os
+import uuid
 
 router = APIRouter()
+
+UPLOAD_FOLDER_PLAYERS = "uploads/players"
+
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
 
 @router.get("/players")
 def get_players():
@@ -113,3 +120,35 @@ def players_with_teams():
         cursor.close()
         conn.close()
         
+
+@router.post("/upload-player-image")
+async def upload_player_image(
+    request: Request,
+    image: UploadFile = File(...)
+):
+
+    token = request.cookies.get("access_token")
+
+    payload = verify_token(token)
+
+    if not payload or payload.get("role") != "admin":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not image.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    ext = image.filename.split(".")[-1].lower()
+
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Invalid file type")
+
+    filename = f"{uuid.uuid4().hex}.{ext}"
+
+    filepath = os.path.join(UPLOAD_FOLDER_PLAYERS, filename)
+
+    with open(filepath, "wb") as buffer:
+        buffer.write(await image.read())
+
+    return {
+        "image_path": f"uploads/players/{filename}"
+    }

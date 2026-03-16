@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 import socketio
 from sockets.socket_manager import sio
 from sockets.socket_events import register_socket_events
@@ -34,6 +35,8 @@ register_socket_events()
 
 #Combine FastAPI + Soket.IO
 socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
+
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 @app.get("/")
 async def root():

@@ -319,101 +319,93 @@ async def get_current_auction(request: Request):
 @router.post("/pause-auction")
 async def pause_auction(request: Request):
 
-    # -------------- AUTH CHECK ---------------
+    # ---------- AUTH CHECK ----------
     token = request.cookies.get("access_token")
 
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    
+
     payload = verify_token(token)
 
     if not payload or payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Forbidden")
-    
+
     conn = get_db_connection()
 
     if conn is None:
-        raise HTTPException(status_code=500, detail="Database Connection Failed")
-    
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
     cursor = conn.cursor(pymysql.cursors.DictCursor)
-    
+
     try:
 
-        # --------------- GET ACTIVE AUCTION -----------------
+        # ---------- GET ACTIVE AUCTION ----------
         cursor.execute("""
-            SELECT player_id, expires_at, paused, paused_remaining
+            SELECT player_id, expires_at, paused
             FROM current_auction
             LIMIT 1
         """)
 
         auction = cursor.fetchone()
 
-        if not auction: 
-            raise HTTPException(status_code=400, detail="No active auction found")
-        
+        if not auction:
+            raise HTTPException(status_code=400, detail="No active auction")
+
         if auction["paused"] == 1:
             raise HTTPException(status_code=400, detail="Auction already paused")
-        
-        # --------------- Calculate remaining time ----------------
+
+        player_id = auction["player_id"]
         expires_at = auction["expires_at"]
 
+        # ---------- Normalize datetime ----------
         if isinstance(expires_at, str):
-            try:
-                expires_at = datetime.fromisoformat(expires_at)
-            except Exception:
-                expires_at = datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S")
+            expires_at = datetime.fromisoformat(expires_at)
 
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
 
-            now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
 
-            remaining = int((expires_at - now).total_seconds())
+        remaining = max(0, int((expires_at - now).total_seconds()))
 
-            if remaining < 0:
-                remaining = 0
+        # ---------- UPDATE DB ----------
+        cursor.execute("""
+            UPDATE current_auction
+            SET paused = 1,
+                paused_remaining = %s
+            WHERE player_id = %s
+        """, (remaining, player_id))
 
-            # ------------- UPDATE DB -----------
-            cursor.execute("""
-                UPDATE current_auction
-                SET paused = 1,
-                    paused_remaining = %s
-                WHERE player_id = %s
-            """,(
-                remaining,
-                auction["player_id"]
-            ))
+        conn.commit()
 
-            conn.commit()
+        print(f"⏸ Auction paused for player {player_id} with {remaining}s remaining")
 
-            print(f"⏸ Auction paused for player {auction["player_id"]} with {remaining}s remaining")
+        # ---------- SOCKET EVENT ----------
+        await sio.emit("auction_paused", {
+            "paused": True,
+            "remaining_seconds": remaining
+        })
 
-            #----------- SOCKET EVENT -----------
-            await sio.emit("auction_paused", {
-                "paused": True,
-                "remainnig_seconds": remaining
-            })
+        return {
+            "status": "auction_paused",
+            "player_id": player_id,
+            "remaining_seconds": remaining
+        }
 
-            return{
-                "meesage": "Auction paused successfuly",
-                "player_id": auction["player_id"],
-                "remaining_seconds": remaining
-            }
-        
     except Exception as e:
         conn.rollback()
-        print("❌ Pause auction error: ",e)
+        print("❌ Pause auction error:", e)
         raise HTTPException(status_code=500, detail=str(e))
-    
+
     finally:
         cursor.close()
         conn.close()
 
 @router.post("/resume-auction")
-async def resume_aution(request: Request):
+async def resume_auction(request: Request):
 
     # ------------- AUTH CHECK -------------
-    token = request.get("access_token")
+    token = request.cookies.get("access_token")
 
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -468,15 +460,15 @@ async def resume_aution(request: Request):
 
         print(f"▶ Auction resumed for player {player_id} - {remaining}s remaining")
 
-        # --------------- START TIMER AGAIN -----------------
-        asyncio.create_task(
-            background_timer(
-                player_id,
-                new_end_time,
-                mode,
-                payload.get("session_id")
-            )
-        )
+        # # --------------- START TIMER AGAIN -----------------
+        # asyncio.create_task(
+        #     background_timer(
+        #         player_id,
+        #         new_end_time,
+        #         mode,
+        #         payload.get("session_id")
+        #     )
+        # )
 
         # ---------------- NOTIFY CLIENTS ----------------
         await sio.emit("auction_resumed",{
@@ -686,6 +678,160 @@ async def cancel_auction(request: Request):
         print("❌ cancel-auction error: ", e)
         raise HTTPException(status_code=500, details= str(e))
     
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.get("/auction-state")
+async def auction_state(request: Request):
+
+    token = request.cookies.get("access_token")
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    payload = verify_token(token)
+
+    if not payload:
+        raise HTTPException(status_code=403, detail="Invalid token")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+
+    try:
+
+        # ---------------- CURRENT AUCTION ----------------
+        cursor.execute("""
+        SELECT 
+            ca.player_id,
+            ca.start_time,
+            ca.expires_at,
+            ca.auction_duration,
+            ca.paused,
+            ca.paused_remaining,
+            p.name,
+            p.image_path,
+            p.jersey,
+            p.category,
+            p.type,
+            p.base_price,
+            p.highest_runs,
+            p.total_runs
+        FROM current_auction ca
+        JOIN players p ON ca.player_id = p.id
+        LIMIT 1
+        """)
+
+        auction = cursor.fetchone()
+
+        if not auction:
+            return {
+                "status": "no_active_auction"
+            }
+
+        player_id = auction["player_id"]
+
+        # ---------------- REMAINING TIME ----------------
+        if auction["paused"]:
+            remaining = int(auction["paused_remaining"] or 0)
+        else:
+            expires_at = auction["expires_at"]
+
+            if isinstance(expires_at, str):
+                expires_at = datetime.fromisoformat(expires_at)
+
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+            now = datetime.now(timezone.utc)
+
+            remaining = max(
+                0,
+                int((expires_at - now).total_seconds())
+            )
+
+        # ---------------- HIGHEST BID ----------------
+        cursor.execute("""
+        SELECT b.team_id, t.name AS team_name, b.bid_amount
+        FROM live_bids b
+        JOIN teams t ON b.team_id = t.team_id
+        WHERE b.player_id = %s
+        ORDER BY b.bid_amount DESC
+        LIMIT 1
+        """, (player_id,))
+
+        highest_bid = cursor.fetchone()
+
+        # ---------------- BID HISTORY ----------------
+        cursor.execute("""
+        SELECT b.team_id, t.name AS team_name, b.bid_amount, b.bid_time
+        FROM live_bids b
+        JOIN teams t ON b.team_id = t.team_id
+        WHERE b.player_id = %s
+        ORDER BY b.bid_time ASC
+        """, (player_id,))
+
+        history = cursor.fetchall()
+
+        current_bid = (
+            float(highest_bid["bid_amount"])
+            if highest_bid
+            else float(auction["base_price"])
+        )
+
+        return {
+            "status": "auction_active",
+            "player": {
+                "id": player_id,
+                "name": auction["name"],
+                "jersey": auction["jersey"],
+                "category": auction["category"],
+                "type": auction["type"],
+                "image_path": auction["image_path"],
+                "base_price": float(auction["base_price"]),
+                "highest_runs": auction["highest_runs"],
+                "total_runs": auction["total_runs"]
+            },
+            "current_bid": current_bid,
+            "highest_bid": highest_bid,
+            "remaining_seconds": remaining,
+            "paused": bool(auction["paused"]),
+            "history": history
+        }
+
+    except Exception as e:
+
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        cursor.close()
+        conn.close()
+
+@router.get("/auction-status")
+async def auction_status():
+
+    conn = get_db_connection()
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+
+    try:
+
+        cursor.execute("SELECT player_id FROM current_auction LIMIT 1")
+        auction = cursor.fetchone()
+
+        if auction:
+            return {
+                "status": "auction_live",
+                "player_id": auction["player_id"]
+            }
+
+        return {
+            "status": "waiting"
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
     finally:
         cursor.close()
         conn.close()

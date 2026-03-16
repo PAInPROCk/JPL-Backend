@@ -100,6 +100,7 @@ async def place_bid(sid, data):
             return
 
         conn = get_db_connection()
+        conn.begin()
         cursor = conn.cursor(pymysql.cursors.DictCursor)
 
         try:
@@ -240,16 +241,38 @@ async def place_bid(sid, data):
                 to=sid
             )
 
-            # ---------------- BROADCAST BID ----------------
-            await sio.emit(
-                "bid_placed",
-                {
-                    "player_id": active_player,
-                    "team_id": team_id,
-                    "team_name": team["name"],
-                    "bid_amount": float(bid_amount)
-                }
-            )
+
+            # ---------- FETCH HIGHEST BID ----------
+            cursor.execute("""
+            SELECT b.team_id, b.bid_amount, t.name AS team_name
+            FROM live_bids b
+            JOIN teams t ON b.team_id = t.team_id
+            WHERE b.player_id = %s
+            ORDER BY b.bid_amount DESC
+            LIMIT 1
+            """, (active_player,))
+
+            highest = cursor.fetchone()
+
+            # ---------- FETCH BID HISTORY ----------
+            cursor.execute("""
+            SELECT b.team_id, t.name AS team_name, b.bid_amount, b.bid_time
+            FROM live_bids b
+            JOIN teams t ON b.team_id = t.team_id
+            WHERE b.player_id = %s
+            ORDER BY b.bid_time ASC
+            """, (active_player,))
+
+            history = cursor.fetchall()
+
+            current_bid = float(highest["bid_amount"]) if highest else base_price
+            # ---------- BROADCAST UPDATE ----------
+            await sio.emit("auction_update", {
+                "player_id": active_player,
+                "current_bid": current_bid,
+                "highest_bid": highest,
+                "history": history
+            })
 
         except Exception as e:
 
