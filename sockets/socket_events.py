@@ -3,11 +3,17 @@ import asyncio
 from core.database import get_db_connection
 import pymysql
 from auth.auth_handler import verify_token
+from decimal import Decimal
 
 
 MIN_INCREAMENT = 500
 
 bid_lock = asyncio.Lock()
+
+def normalize_decimal(obj):
+    if isinstance(obj, Decimal):
+        return float(obj)
+    return obj
 
 def register_socket_events():
     @sio.event
@@ -85,17 +91,25 @@ async def join_auction(sid):
 async def place_bid(sid, data):
 
     async with bid_lock:
+            
+        team_id = data.get("team_id")
+        player_id = data.get("player_id")
+        bid_amount = float(data.get("bid_amount"))
 
+        if bid_amount is None:
+            await sio.emit(
+                "bid_rejected", 
+                {"error": "Bid amount missing"},
+                to= sid
+            )
+            return
+        
         try:
-            team_id = data.get("team_id")
-            player_id = data.get("player_id")
-            bid_amount = float(data.get("bid_amount"))
-
-        except Exception:
+            bid_amount = float(bid_amount)
+        except (TypeError, ValueError):
             await sio.emit(
                 "bid_rejected",
-                {"error": "Invalid bid amount"},
-                to=sid
+                {"error": "Invalid bid amount"}
             )
             return
 
@@ -168,7 +182,7 @@ async def place_bid(sid, data):
             )
 
             player = cursor.fetchone()
-            base_price = float(player["base_price"]) if player else 0
+            base_price = float(player["base_price"]) if player and player["base_price"] else 0
 
             # ---------------- CURRENT HIGHEST BID ----------------
             cursor.execute(
@@ -254,6 +268,9 @@ async def place_bid(sid, data):
 
             highest = cursor.fetchone()
 
+            if highest and isinstance(highest["bid_amount"], Decimal):
+                highest["bid_amount"] = float(highest["bid_amount"])
+
             # ---------- FETCH BID HISTORY ----------
             cursor.execute("""
             SELECT b.team_id, t.name AS team_name, b.bid_amount, b.bid_time
@@ -264,6 +281,13 @@ async def place_bid(sid, data):
             """, (active_player,))
 
             history = cursor.fetchall()
+
+            for h in history:
+                if isinstance(h["bid_amount"], Decimal):
+                    h["bid_amount"] = float(h["bid_amount"])
+
+                if h.get("bid_time"):
+                    h["bid_time"] = h["bid_time"].isoformat()
 
             current_bid = float(highest["bid_amount"]) if highest else base_price
             # ---------- BROADCAST UPDATE ----------
