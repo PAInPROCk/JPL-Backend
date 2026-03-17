@@ -21,6 +21,10 @@ async def background_timer(player_id, expires_at, mode, session_id):
             )
 
             state = cursor.fetchone()
+            if not state:
+                print("⚠ Auction row missing - stopping timer")
+                return
+            
             print("PAUSE STATE:", state["paused"])
 
         finally:

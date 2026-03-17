@@ -90,7 +90,15 @@ async def start_auction(data: StartAuctionRequest, request: Request):
             raise HTTPException(400, "Invalid mode")
 
         if not player:
-            raise HTTPException(404, "No eligible player found")
+            print("🏁 No eligible players remaining")
+            await sio.emit("auction_finished", {
+                "message": "No players available for auction"
+            })
+
+            return{
+                "status": "finished",
+                "message": "No players available for auction"
+            }
 
         player_id = player["id"]
 
@@ -156,7 +164,12 @@ async def start_auction(data: StartAuctionRequest, request: Request):
 
     except Exception as e:
         conn.rollback()
-        raise HTTPException(500, str(e))
+        raise e
+
+    except Exception as e:
+        conn.rollback()
+        print("❌ start-auction error: ",e)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
     finally:
         cursor.close()
@@ -635,11 +648,14 @@ async def cancel_auction(request: Request):
 
         player_info = cursor.fetchone()
 
-        if not player_info:
-            player_info = {
-                "id": player_id,
-                "name": "Unknown"
-            }
+        if player_info and isinstance(player_info.get("base_price"), Decimal):
+            player_info["base_price"] = float(player_info["base_price"])
+
+        # if not player_info:
+        #     player_info = {
+        #         "id": player_id,
+        #         "name": "Unknown"
+        #     }
 
         # -------------- MARK UNSOLD --------------
         cursor.execute("""
@@ -648,7 +664,7 @@ async def cancel_auction(request: Request):
             VALUES (%s, %s, NOW())
         """, (
             player_id,
-            "Auction manually cancelled"
+            "Auction manually cancelled by admin"
         ))
 
         # ------------- CLEANUP ----------------
@@ -662,10 +678,10 @@ async def cancel_auction(request: Request):
         await sio.emit("auction_ended", {
             "status":"unsold",
             "player": player_info,
-            "message": "🛑 Auction cancelled - player marked unsold manually"
+            "message": "🛑 Auction cancelled by admin - player marked unsold manually"
         })
 
-        print(f"🛑 Auction cancelled manually for players {player_info.get('name')}")
+        print(f"🛑 Auction cancelled manually for player {player_info.get('name')}")
 
         return{
             "message": f"Auction cancelled for {player_info.get('name')}",
@@ -676,7 +692,7 @@ async def cancel_auction(request: Request):
 
         conn.rollback()
         print("❌ cancel-auction error: ", e)
-        raise HTTPException(status_code=500, details= str(e))
+        raise HTTPException(status_code=500, detail= str(e))
     
     finally:
         cursor.close()
