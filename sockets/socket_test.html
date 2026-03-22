@@ -9,8 +9,7 @@
 <h2>Socket Test</h2>
 
 <script>
-const socket = io("http://localhost:5000");
-
+const socket = io("http://192.168.0.101:5000");
 socket.on("connect", () => {
     console.log("Connected:", socket.id);
 });

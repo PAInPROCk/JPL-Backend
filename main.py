@@ -10,18 +10,32 @@ from auth.auth_routes import router as auth_router
 from routers.players import router as players_router
 from routers.teams import router as teams_router
 from routers.auction_routes import router as auction_router
+import socket
+from core.utils import get_local_ip
+
 #Create FastAPI app
 app =  FastAPI()
 app.include_router(auth_router)
 app.include_router(players_router)
 app.include_router(teams_router)
 app.include_router(auction_router)
+
+
+
 #CORS Setup for frontend and Backend connectivity
 
+FRONTEND_PORT = 3000
+local_ip = get_local_ip()
+
 origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000"
+    f"http://localhost:{FRONTEND_PORT}",
+    f"http://127.0.0.1:{FRONTEND_PORT}",
+    f"http://{local_ip}:{FRONTEND_PORT}"
 ]
+
+print("🌐 Allowed CORS Origins:", origins)
+print(f"🚀 Server running on: http://{local_ip}:5000")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins= origins,

@@ -1,9 +1,12 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Request
+from fastapi import APIRouter, UploadFile, File, HTTPException, Request, Form
 from auth.auth_handler import verify_token
 from core.database import get_db_connection
 import pymysql
 import os
 import uuid
+
+from typing import List, Optional
+
 
 router = APIRouter()
 
@@ -152,3 +155,132 @@ async def upload_player_image(
     return {
         "image_path": f"uploads/players/{filename}"
     }
+
+
+
+
+@router.post("/add-player")
+async def add_player(
+    request: Request,
+
+    # -------- FORM FIELDS --------
+    playerName: Optional[str] = Form(None),
+    fatherName: Optional[str] = Form(None),
+    surName: Optional[str] = Form(None),
+    nickName: Optional[str] = Form(None),
+    age: Optional[int] = Form(None),
+    category: Optional[str] = Form(None),
+    style: Optional[str] = Form(None),
+    basePrice: Optional[float] = Form(0),
+    totalRuns: Optional[int] = Form(0),
+    highestRuns: Optional[int] = Form(0),
+    wickets: Optional[int] = Form(0),
+    outs: Optional[int] = Form(0),
+    jerseyNo: Optional[int] = Form(None),
+    mobile: Optional[str] = Form(None),
+    emailId: Optional[str] = Form(None),
+    gender: Optional[str] = Form(None),
+
+    # -------- MULTI-SELECT TEAMS --------
+    teams: Optional[List[int]] = Form([]),
+
+    # -------- FILE --------
+    image: Optional[UploadFile] = File(None)
+):
+    # ================= AUTH =================
+    token = request.cookies.get("access_token")
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    user = verify_token(token)
+
+    if not user or user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # ================= NAME =================
+    full_name = " ".join(
+        part for part in [playerName, fatherName, surName] if part
+    ).strip()
+
+    if not full_name:
+        raise HTTPException(status_code=400, detail="Player full name is required")
+
+    # ================= IMAGE UPLOAD =================
+    image_path = None
+
+    if image:
+        ext = image.filename.split(".")[-1].lower()
+
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(status_code=400, detail="Invalid image format")
+
+        os.makedirs(UPLOAD_FOLDER_PLAYERS, exist_ok=True)
+
+        filename = f"{uuid.uuid4().hex}.{ext}"
+        filepath = os.path.join(UPLOAD_FOLDER_PLAYERS, filename)
+
+        with open(filepath, "wb") as f:
+            f.write(await image.read())
+
+        image_path = f"uploads/players/{filename}"
+
+    # ================= DB =================
+    conn = get_db_connection()
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+
+    try:
+        # -------- INSERT PLAYER --------
+        cursor.execute("""
+            INSERT INTO players 
+            (name, nickname, age, category, type, base_price, total_runs, highest_runs, 
+             wickets_taken, times_out, image_path, jersey, mobile_No, email_Id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            full_name,
+            nickName,
+            age,
+            category,
+            style,
+            basePrice,
+            totalRuns,
+            highestRuns,
+            wickets,
+            outs,
+            image_path,
+            jerseyNo,
+            mobile,
+            emailId
+        ))
+
+        player_id = cursor.lastrowid
+
+        # -------- INSERT PLAYER-TEAMS --------
+        for team_id in teams:
+            cursor.execute(
+                "INSERT INTO player_teams (player_id, team_id) VALUES (%s, %s)",
+                (player_id, int(team_id))
+            )
+
+        conn.commit()
+
+        return {
+            "message": "Player added successfully!",
+            "player_id": player_id
+        }
+
+    except pymysql.IntegrityError:
+        conn.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail="Player with same name or jersey number exists"
+        )
+
+    except Exception as e:
+        conn.rollback()
+        print("❌ add-player error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        cursor.close()
+        conn.close()

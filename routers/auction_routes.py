@@ -851,3 +851,295 @@ async def auction_status():
     finally:
         cursor.close()
         conn.close()
+
+
+@router.post("/mark-sold")
+async def mark_sold(request: Request):
+
+    # ---------- AUTH CHECK ----------
+    token = request.cookies.get("access_token")
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    payload = verify_token(token)
+
+    if not payload or payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    data = await request.json()
+    player_id = data.get("player_id")
+    session_id = payload.get("session_id", "default")
+
+    if not player_id:
+        raise HTTPException(status_code=400, detail="player_id required")
+
+    conn = get_db_connection()
+
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+
+    try:
+
+        # ---------- GET HIGHEST BID ----------
+        cursor.execute("""
+            SELECT b.team_id, b.bid_amount, t.name AS team_name
+            FROM live_bids b
+            JOIN teams t ON b.team_id = t.team_id
+            WHERE b.player_id = %s
+            ORDER BY b.bid_amount DESC, b.bid_time ASC
+            LIMIT 1
+        """, (player_id,))
+
+        top = cursor.fetchone()
+
+        if not top:
+            raise HTTPException(status_code=404, detail="No live bids for this player")
+
+        sold_price = float(top["bid_amount"])
+        team_id = top["team_id"]
+        team_name = top["team_name"]
+
+        # ---------- DEDUCT TEAM PURSE ----------
+        cursor.execute(
+            "UPDATE teams SET purse = purse - %s WHERE team_id = %s",
+            (sold_price, team_id)
+        )
+
+        # ---------- INSERT SOLD PLAYER ----------
+        cursor.execute("""
+            INSERT INTO sold_players (player_id, team_id, sold_price, session_id, sold_time)
+            VALUES (%s, %s, %s, %s, NOW())
+        """, (player_id, team_id, sold_price, session_id))
+
+        # ---------- CLEAN AUCTION TABLES ----------
+        cursor.execute(
+            "DELETE FROM current_auction WHERE player_id = %s",
+            (player_id,)
+        )
+
+        cursor.execute(
+            "DELETE FROM live_bids WHERE player_id = %s",
+            (player_id,)
+        )
+
+        conn.commit()
+
+        # ---------- FETCH PLAYER INFO ----------
+        cursor.execute("""
+            SELECT id, name, category, type, image_path, base_price
+            FROM players
+            WHERE id = %s
+        """, (player_id,))
+
+        player_info = cursor.fetchone()
+
+        if player_info:
+            for k, v in player_info.items():
+                if isinstance(v, Decimal):
+                    player_info[k] = float(v)
+
+        if not player_info:
+            player_info = {"id": player_id}
+
+        # ---------- SOCKET PAYLOAD ----------
+        payload = {
+            "status": "sold",
+            "player": player_info,
+            "team": {
+                "team_id": team_id,
+                "team_name": team_name,
+                "bid_amount": sold_price
+            },
+            "sold_price": sold_price,
+            "message": f"Player sold to {team_name} for ₹{sold_price}"
+        }
+
+        # ---------- EMIT SOCKET EVENT ----------
+        await sio.emit("auction_ended", payload)
+
+        print(f"✅ Player {player_info.get('name')} SOLD to {team_name} for ₹{sold_price}")
+
+        # ---------- START NEXT AUCTION ----------
+        await sio.emit("next_player_loading", {"delay": 10})
+        
+        print("⏳ Waiting 10 seconds before next player")
+        await asyncio.sleep(10)
+        
+        # -------- SELECT NEXT PLAYER --------
+        cursor.execute("""
+            SELECT * FROM players
+            WHERE id NOT IN (
+                SELECT player_id FROM sold_players
+                UNION
+                SELECT player_id FROM unsold_players
+            )
+            ORDER BY RAND()
+            LIMIT 1
+            """)
+        
+        next_player = cursor.fetchone()
+        
+        if not next_player:
+            await sio.emit("auction_finished", {})
+            return
+        
+        start_time = datetime.now(timezone.utc)
+        duration = 120
+        expires_at = start_time + timedelta(seconds=duration)
+        
+        cursor.execute("""
+            INSERT INTO current_auction
+            (player_id,start_time,expires_at,auction_duration,mode)
+            VALUES (%s,%s,%s,%s,%s)
+            """, (
+                next_player["id"],
+                start_time,
+                expires_at,
+                duration,
+                "random"
+            ))
+        
+        conn.commit()
+        
+        await sio.emit("auction_started", {
+    "player_id": next_player["id"],
+    "player_name": next_player["name"],
+    "mode": "random",
+    "duration": duration,
+    "expires_at": expires_at.isoformat()
+})
+        asyncio.create_task(
+    background_timer(
+        next_player["id"],
+        expires_at,
+        "random",
+        session_id
+    )
+)
+        print(f"🚀 Next auction started for {next_player['name']}")
+
+        return {
+            "success": True,
+            "message": "Player marked as SOLD",
+            "player": player_info,
+            "team": {
+                "team_id": team_id,
+                "team_name": team_name,
+                "bid_amount": sold_price
+            }
+        }
+
+    except Exception as e:
+        conn.rollback()
+        print("❌ Error in mark_sold:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
+
+@router.post("/mark-unsold")
+async def mark_unsold(request: Request):
+
+    # ---------- AUTH CHECK ----------
+    token = request.cookies.get("access_token")
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    payload = verify_token(token)
+
+    if not payload or payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    conn = get_db_connection()
+
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+
+    try:
+
+        # ---------- GET CURRENT PLAYER ----------
+        cursor.execute("SELECT player_id FROM current_auction LIMIT 1")
+        auction = cursor.fetchone()
+
+        if not auction:
+            raise HTTPException(status_code=400, detail="No active auction")
+
+        player_id = auction["player_id"]
+
+        # ---------- FETCH PLAYER INFO ----------
+        cursor.execute("""
+            SELECT id, name, category, type, image_path, base_price
+            FROM players
+            WHERE id = %s
+        """, (player_id,))
+
+        player_info = cursor.fetchone()
+
+        if player_info:
+            for k, v in player_info.items():
+                if isinstance(v, Decimal):
+                    player_info[k] = float(v)
+
+        if not player_info:
+            player_info = {"id": player_id}
+
+        # ---------- INSERT INTO UNSOLD ----------
+        cursor.execute("""
+            INSERT INTO unsold_players
+            (player_id, reason, added_on)
+            VALUES (%s, %s, NOW())
+        """, (
+            player_id,
+            "Marked unsold manually by admin"
+        ))
+
+        # ---------- CLEANUP ----------
+        cursor.execute(
+            "DELETE FROM current_auction WHERE player_id=%s",
+            (player_id,)
+        )
+
+        cursor.execute(
+            "DELETE FROM live_bids WHERE player_id=%s",
+            (player_id,)
+        )
+
+        conn.commit()
+
+        # ---------- SOCKET EVENT ----------
+        payload = {
+            "status": "unsold",
+            "player": player_info,
+            "base_price": player_info.get("base_price"),
+            "message": "Player marked as UNSOLD"
+        }
+
+        await sio.emit("auction_ended", payload)
+
+        print(f"⚠️ Player {player_info.get('name')} marked UNSOLD")
+
+        return {
+            "success": True,
+            "message": "Player marked as UNSOLD",
+            "player": player_info
+        }
+
+    except Exception as e:
+
+        conn.rollback()
+        print("❌ Error in mark_unsold:", e)
+
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        cursor.close()
+        conn.close()

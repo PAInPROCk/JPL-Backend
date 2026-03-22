@@ -110,13 +110,31 @@ async def background_timer(player_id, expires_at, mode, session_id):
                 top_bid["bid_amount"]
             ))
 
+            # Fetch player info
+            cursor.execute("""
+                SELECT id, name, category, type, image_path, base_price
+                FROM players
+                WHERE id = %s
+                """, (player_id,))
+            
+            player_info = cursor.fetchone()
+            
+            from decimal import Decimal
+            if player_info:
+                for k, v in player_info.items():
+                     if isinstance(v, Decimal):
+                          player_info[k] = float(v)
+                          
             await sio.emit("auction_ended", {
                 "status": "sold",
-                "player_id": player_id,
-                "team_id": top_bid["team_id"],
-                "team_name": top_bid["team_name"],
-                "bid_amount": float(top_bid["bid_amount"])
-            })
+                "player": player_info,
+                "team": {
+                    "team_id": top_bid["team_id"],
+                    "team_name": top_bid["team_name"],
+                    "bid_amount": float(top_bid["bid_amount"])
+                },
+                "message": f"Player sold to {top_bid['team_name']} for ₹{top_bid['bid_amount']}"
+         })
 
             await sio.emit("next_player_loading", {
                 "delay": 10
@@ -129,9 +147,25 @@ async def background_timer(player_id, expires_at, mode, session_id):
             VALUES (%s,%s,NOW())
             """, (player_id, "No Bids"))
 
+            # Fetch player info
+            cursor.execute("""
+                SELECT id, name, category, type, image_path, base_price
+                FROM players
+                WHERE id = %s
+            """, (player_id,))
+            
+            player_info = cursor.fetchone()
+            
+            from decimal import Decimal
+            if player_info:
+                for k, v in player_info.items():
+                    if isinstance(v, Decimal):
+                        player_info[k] = float(v)
+                        
             await sio.emit("auction_ended", {
                 "status": "unsold",
-                "player_id": player_id
+                "player": player_info,
+                "message": "No bids received — player marked UNSOLD"
             })
 
             await sio.emit("next_player_loading", {
