@@ -122,7 +122,30 @@ def players_with_teams():
     finally:
         cursor.close()
         conn.close()
-        
+
+@router.get("/players/{player_id}")
+async def get_player(player_id: int):
+
+    conn = get_db_connection()
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+
+    try:
+
+        cursor.execute(
+            "SELECT * FROM players WHERE id=%s",
+            (player_id,)
+        )
+
+        player = cursor.fetchone()
+
+        if not player:
+            raise HTTPException(status_code=404, detail="Player not found")
+
+        return player
+
+    finally:
+        cursor.close()
+        conn.close()        
 
 @router.post("/upload-player-image")
 async def upload_player_image(

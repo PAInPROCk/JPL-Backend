@@ -16,7 +16,12 @@ def login(data: dict, response: Response):
     
     cursor = conn.cursor()
 
-    cursor.execute("SELECT id, name, email, password, role, team_id FROM users WHERE email = %s",(data["email"],))
+    cursor.execute("""
+    SELECT u.id, u.name, u.email, u.password, u.role, u.team_id, t.purse
+    FROM users u
+    LEFT JOIN teams t ON u.team_id = t.team_id
+    WHERE u.email=%s
+    """,(data["email"],))
 
     user = cursor.fetchone()
 
@@ -34,7 +39,8 @@ def login(data: dict, response: Response):
         "email":user["email"],
         "role": user["role"],
         "team_id": user["team_id"],
-        "name": user["name"]
+        "name": user["name"],
+        "team_purse": float(user["purse"]) if user["purse"] else 0
     })
 
     response.set_cookie(
@@ -50,9 +56,10 @@ def login(data: dict, response: Response):
         "message": "Login Successful",
         "user": {
             "id": user["id"],
-            "name": user["role"],
+            "name": user["name"],
             "role": user["role"],
-            "team_id": user["team_id"]
+            "team_id": user["team_id"],
+            "team_purse": float(user["purse"]) if user["purse"] else 0
         }
     }
         

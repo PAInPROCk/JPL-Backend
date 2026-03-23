@@ -134,11 +134,20 @@ async def start_auction(data: StartAuctionRequest, request: Request):
         })
 
         await sio.emit("auction_started", {
-            "player_id": player_id,
-            "player_name": player["name"],
-            "mode": mode,
+            "player": {
+                "id": player["id"],
+                "name": player["name"],
+                "image_path": player["image_path"],
+                "jersey": player["jersey"],
+                "category": player["category"],
+                "type": player["type"],
+                "base_price": float(player["base_price"]),
+                "highest_runs": player["highest_runs"]
+                },
             "duration": duration,
-            "expires_at": expires_at.isoformat()
+            "expires_at": expires_at.isoformat(),
+            "current_bid": float(player["base_price"]),
+            "history": []
         })
 
         # -------- START TIMER --------
@@ -146,7 +155,6 @@ async def start_auction(data: StartAuctionRequest, request: Request):
         asyncio.create_task(
             background_timer(
                 player_id,
-                expires_at,
                 mode,
                 payload.get("session_id")
             )
@@ -509,101 +517,52 @@ async def resume_auction(request: Request):
 @router.post("/next-auction")
 async def next_auction(request: Request):
 
-    # -------------- AUTH -------------
     token = request.cookies.get("access_token")
 
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    
+
     payload = verify_token(token)
 
     if not payload or payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Forbidden")
-    
+
     conn = get_db_connection()
     cursor = conn.cursor(pymysql.cursors.DictCursor)
 
     try:
-        # --------------- CURRENT AUCTION ------------------
 
-        cursor.execute("SELECT * FROM current_auction LIMIT 1")
+        cursor.execute("SELECT player_id FROM current_auction LIMIT 1")
         auction = cursor.fetchone()
 
         if not auction:
             raise HTTPException(status_code=400, detail="No active auction")
-        
+
         player_id = auction["player_id"]
 
-        # --------------- TOP BID ---------------
+        # Force timer expiry
         cursor.execute("""
-            SELECT b.team_id, b.bid_amount, t.name AS team_name
-            FROM live_bids b
-            JOIN teams t ON b.team_id = t.team_id
-            WHERE b.player_id = %s
-            ORDER BY b.bid_amount DESC
-            LIMIT 1
+            UPDATE current_auction
+            SET expires_at = start_time
+            WHERE player_id = %s
         """, (player_id,))
-
-        top_bid = cursor.fetchone()
-
-        # ------------- SOLD ------------
-        if top_bid:
-            cursor.execute("""
-                UPDATE teams
-                SET purse = purse - %s
-                WHERE team_id = %s
-            """, (top_bid["bid_amount"], top_bid["team_id"]))
-
-            cursor.execute("""
-                INSERT INTO sold_player
-                (player_id, team_id, sold_price, sold_time)
-                VALUES (%s, %s, %s, NOW())
-            """,(
-                player_id,
-                top_bid["team_id"],
-                top_bid["bid_amount"]
-            ))
-
-            await sio.emit("auction_ended", {
-                "status": "sold",
-                "player_id": player_id,
-                "team_bid": top_bid["team_id"],
-                "team_name": top_bid["team_name"],
-                "bid_amount": float(top_bid["bid_amount"])
-            })
-
-        # ------------ UNSOLD ------------
-        else:
-
-            cursor.execute("""
-                INSERT INTO unsold_players
-                (player_id, reason, added_on)
-                VALUES(%s, %s,NOW())
-            """, (player_id,"Admin skipped"))
-
-            await sio.emit("auction_ended",{
-                "status": "unsold",
-                "player_id": player_id
-            })
-
-        # ------------- CLEANUP ------------
-        cursor.execute("DELETE FROM current_auction WHERE player_id=%s", (player_id,))
-        cursor.execute("DELETE FROM live_bids WHERE player_id = %s", (player_id,))
 
         conn.commit()
 
-        print(f"⏭ Admin skipped player {player_id}")
+        print(f"⏭ Admin forced auction end for player {player_id}")
 
-        return{
-            "status": "auction_moved",
+        return {
+            "status": "forced_end",
             "player_id": player_id
         }
+
     except Exception as e:
 
         conn.rollback()
-        print("Next auction error: ", e)
+        print("Next auction error:", e)
+
         raise HTTPException(status_code=500, detail=str(e))
-    
+
     finally:
         cursor.close()
         conn.close()
@@ -837,12 +796,12 @@ async def auction_status():
 
         if auction:
             return {
-                "status": "auction_live",
+                "active": True,
                 "player_id": auction["player_id"]
             }
 
         return {
-            "status": "waiting"
+            "active": False
         }
 
     except Exception as e:

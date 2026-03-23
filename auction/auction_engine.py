@@ -5,7 +5,7 @@ import pymysql
 from core.database import get_db_connection
 from sockets.socket_manager import sio
 
-async def background_timer(player_id, expires_at, mode, session_id):
+async def background_timer(player_id, mode, session_id):
 
     print(f"⏰ Timer started for player {player_id}")
 
@@ -44,6 +44,9 @@ async def background_timer(player_id, expires_at, mode, session_id):
         now = datetime.now(timezone.utc)
 
         db_expires = state["expires_at"]
+        if not db_expires:
+            print("⚠ expires_at missing")
+            return
 
         if isinstance(db_expires, str):
             db_expires = datetime.fromisoformat(db_expires)
@@ -61,7 +64,7 @@ async def background_timer(player_id, expires_at, mode, session_id):
             "server_time": now.isoformat()
         })
 
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.9)
 
     print("⏰ Timer expired")
 
@@ -227,17 +230,25 @@ async def background_timer(player_id, expires_at, mode, session_id):
         conn.commit()
 
         await sio.emit("auction_started", {
-            "player_id": next_player["id"],
-            "player_name": next_player["name"],
-            "mode": mode,
+            "player": {
+                "id": next_player["id"],
+                "name": next_player["name"],
+                "image_path": next_player["image_path"],
+                "jersey": next_player["jersey"],
+                "category": next_player["category"],
+                "type": next_player["type"],
+                "base_price": float(next_player["base_price"]),
+                "highest_runs": next_player["highest_runs"]
+            },
             "duration": duration,
-            "expires_at": expires_at.isoformat()
+            "expires_at": expires_at.isoformat(),
+            "current_bid": float(next_player["base_price"]),
+            "history": []
         })
 
         asyncio.create_task(
             background_timer(
                 next_player["id"],
-                expires_at,
                 mode,
                 session_id
             )
@@ -248,3 +259,72 @@ async def background_timer(player_id, expires_at, mode, session_id):
     finally:
         cursor.close()
         conn.close()
+
+
+# async def load_next_player_after_delay():
+
+#     print("⏳ Waiting 10 seconds before next player")
+
+#     await asyncio.sleep(10)
+
+#     conn = get_db_connection()
+#     cursor = conn.cursor(pymysql.cursors.DictCursor)
+
+#     try:
+
+#         cursor.execute("""
+#         SELECT *
+#         FROM players
+#         WHERE id NOT IN (
+#             SELECT player_id FROM sold_players
+#             UNION
+#             SELECT player_id FROM unsold_players
+#         )
+#         ORDER BY RAND()
+#         LIMIT 1
+#         """)
+
+#         player = cursor.fetchone()
+
+#         if not player:
+#             await sio.emit("auction_finished")
+#             return
+
+#         duration = 120
+#         start_time = datetime.now(timezone.utc)
+#         expires_at = start_time + timedelta(seconds=duration)
+
+#         cursor.execute("""
+#         INSERT INTO current_auction
+#         (player_id,start_time,expires_at,auction_duration,mode)
+#         VALUES (%s,%s,%s,%s,%s)
+#         """, (
+#             player["id"],
+#             start_time,
+#             expires_at,
+#             duration,
+#             "random"
+#         ))
+
+#         conn.commit()
+
+#         await sio.emit("auction_started", {
+#             "player": {
+#                 "id": player["id"],
+#                 "name": player["name"],
+#                 "image_path": player["image_path"],
+#                 "jersey": player["jersey"],
+#                 "category": player["category"],
+#                 "type": player["type"],
+#                 "base_price": float(player["base_price"]),
+#                 "highest_runs": player["highest_runs"]
+#             },
+#             "duration": duration,
+#             "expires_at": expires_at.isoformat(),
+#             "current_bid": float(player["base_price"]),
+#             "history": []
+#         })
+
+#     finally:
+#         cursor.close()
+#         conn.close()
