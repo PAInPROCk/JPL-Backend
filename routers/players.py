@@ -4,6 +4,13 @@ from core.database import get_db_connection
 import pymysql
 import os
 import uuid
+import zipfile
+import csv
+import tempfile
+import shutil
+import pandas as pd
+import numpy as np
+
 
 from typing import List, Optional
 
@@ -303,6 +310,113 @@ async def add_player(
         conn.rollback()
         print("❌ add-player error:", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/upload-players")
+async def upload_players(request: Request, file: UploadFile = File(...)):
+
+    token = request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(401, "Unauthorized")
+
+    payload = verify_token(token)
+    if not payload or payload.get("role") != "admin":
+        raise HTTPException(403, "Forbidden")
+
+    # ---------- TEMP DIR ----------
+    temp_dir = tempfile.mkdtemp()
+    zip_path = os.path.join(temp_dir, file.filename)
+
+    # Save ZIP
+    with open(zip_path, "wb") as f:
+        f.write(await file.read())
+
+    # ---------- EXTRACT ZIP ----------
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(temp_dir)
+    except:
+        raise HTTPException(400, "Invalid ZIP file")
+
+    # ---------- FIND EXCEL ----------
+    excel_file = None
+    for f in os.listdir(temp_dir):
+        if f.endswith(".xlsx") or f.endswith(".xls"):
+            excel_file = os.path.join(temp_dir, f)
+
+    if not excel_file:
+        raise HTTPException(400, "Excel file not found in ZIP")
+
+    # ---------- READ EXCEL ----------
+    df = pd.read_excel(excel_file)
+
+    # 🔥 IMPORTANT FIX
+    df = df.replace({np.nan: None})
+
+    records = df.to_dict(orient="records")
+
+    # ---------- MOVE IMAGES ----------
+    images_folder = os.path.join(temp_dir, "images")
+
+    os.makedirs(UPLOAD_FOLDER_PLAYERS, exist_ok=True)
+
+    if os.path.exists(images_folder):
+        for img in os.listdir(images_folder):
+            src = os.path.join(images_folder, img)
+            dst = os.path.join(UPLOAD_FOLDER_PLAYERS, img)
+            shutil.move(src, dst)
+
+    # ---------- DB INSERT ----------
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        for row in records:
+            if not row.get("name"):
+                continue
+
+            image_name = row.get("image_name")
+            image_path = f"{UPLOAD_FOLDER_PLAYERS}/{image_name}" if image_name else None
+
+            cursor.execute("""
+                INSERT INTO players (
+                    name, nickname, age, gender, category, jersey, type,
+                    mobile_No, email_Id, base_price,
+                    total_runs, highest_runs, wickets_taken,
+                    times_out, teams_played, image_path
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                row.get("name"),
+                row.get("nickname"),
+                row.get("age"),
+                row.get("gender"),
+                row.get("category"),
+                row.get("jersey"),
+                row.get("type"),
+                row.get("mobile_No"),
+                row.get("email_Id"),
+                row.get("base_price"),
+                row.get("total_runs"),
+                row.get("highest_runs"),
+                row.get("wickets_taken"),
+                row.get("times_out"),
+                row.get("teams_played"),
+                image_path
+            ))
+
+        conn.commit()
+
+        return {"message": "ZIP upload successful 🚀"}
+
+    except Exception as e:
+        conn.rollback()
+        print("❌ upload error:", e)
+        raise HTTPException(500, str(e))
 
     finally:
         cursor.close()

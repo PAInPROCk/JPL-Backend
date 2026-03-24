@@ -85,7 +85,7 @@ async def background_timer(player_id, mode, session_id):
 
         # ---------------- HIGHEST BID ----------------
         cursor.execute("""
-        SELECT b.team_id, b.bid_amount, t.name AS team_name
+        SELECT b.team_id, b.bid_amount, t.name AS team_name,t.image_path
         FROM live_bids b
         JOIN teams t ON b.team_id = t.team_id
         WHERE b.player_id = %s
@@ -134,7 +134,8 @@ async def background_timer(player_id, mode, session_id):
                 "team": {
                     "team_id": top_bid["team_id"],
                     "team_name": top_bid["team_name"],
-                    "bid_amount": float(top_bid["bid_amount"])
+                    "bid_amount": float(top_bid["bid_amount"]),
+                    "image_path": top_bid.get("image_path")
                 },
                 "message": f"Player sold to {top_bid['team_name']} for ₹{top_bid['bid_amount']}"
          })
@@ -237,12 +238,12 @@ async def background_timer(player_id, mode, session_id):
                 "jersey": next_player["jersey"],
                 "category": next_player["category"],
                 "type": next_player["type"],
-                "base_price": float(next_player["base_price"]),
-                "highest_runs": next_player["highest_runs"]
+                "base_price": float(next_player.get("base_price") or 0),
+                "highest_runs": next_player.get("highest_runs") or 0
             },
             "duration": duration,
             "expires_at": expires_at.isoformat(),
-            "current_bid": float(next_player["base_price"]),
+            "current_bid": float(next_player.get("base_price") or 0),
             "history": []
         })
 

@@ -141,12 +141,12 @@ async def start_auction(data: StartAuctionRequest, request: Request):
                 "jersey": player["jersey"],
                 "category": player["category"],
                 "type": player["type"],
-                "base_price": float(player["base_price"]),
+                "base_price": float(player.get("base_price")or 0),
                 "highest_runs": player["highest_runs"]
                 },
             "duration": duration,
             "expires_at": expires_at.isoformat(),
-            "current_bid": float(player["base_price"]),
+            "current_bid": float(player.get("base_price") or 0),
             "history": []
         })
 

@@ -81,13 +81,13 @@ def register_socket_events():
                     "jersey": auction["jersey"],
                     "category": auction["category"],
                     "type": auction["type"],
-                    "base_price": float(auction["base_price"]),
-                    "highest_runs": auction["highest_runs"]
+                    "base_price": float(auction.get("base_price") or 0),
+                    "highest_runs": auction.get("highest_runs") or 0
                 },
                 "highest_bid": {
                     "team_id": top_bid["team_id"],
                     "team_name": top_bid["team_name"],
-                    "bid_amount": float(top_bid["bid_amount"])
+                    "bid_amount": float(top_bid.get("bid_amount") or 0)
                 } if top_bid else None
 
             }, to=sid)
@@ -105,7 +105,17 @@ def register_socket_events():
             
             team_id = data.get("team_id")
             player_id = data.get("player_id")
-            bid_amount = data.get("bid_amount")
+            bid_value = data.get("bid_amount")
+
+            if bid_value is None:
+                await sio.emit(
+                    "bid_rejected",
+                    {"error": "Bid amount is required"},
+                    to=sid
+                )
+                return
+            
+            bid_amount = float(bid_value)
 
             if bid_amount is None:
                 await sio.emit(
@@ -193,7 +203,7 @@ def register_socket_events():
                 )
 
                 player = cursor.fetchone()
-                base_price = float(player["base_price"]) if player else 0
+                base_price = float(player.get("base_price") or 0) if player else 0
 
                 # ---------------- CURRENT HIGHEST BID ----------------
                 cursor.execute(
