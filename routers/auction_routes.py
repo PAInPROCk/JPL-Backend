@@ -6,7 +6,7 @@ from decimal import Decimal
 from auction.auction_engine import background_timer
 from core.database import get_db_connection
 from auth.auth_handler import verify_token
-from sockets.socket_manager import sio
+from sockets.socket_manager import sio, team_sockets
 from models.schemas import StartAuctionRequest
 
 router = APIRouter()
@@ -866,6 +866,20 @@ async def mark_sold(request: Request):
             "UPDATE teams SET purse = purse - %s WHERE team_id = %s",
             (sold_price, team_id)
         )
+        cursor.execute(
+            "SELECT purse FROM teams WHERE team_id=%s",
+            (team_id,)
+        )
+        row = cursor.fetchone()
+        updated_purse = float(row["purse"])
+        winner_sid = team_sockets.get(team_id)
+
+        if winner_sid:
+            await sio.emit(
+                "purse_update",
+                {"purse": updated_purse},
+                to= winner_sid
+            )
 
         # ---------- INSERT SOLD PLAYER ----------
         cursor.execute("""
@@ -973,7 +987,6 @@ async def mark_sold(request: Request):
         asyncio.create_task(
     background_timer(
         next_player["id"],
-        expires_at,
         "random",
         session_id
     )

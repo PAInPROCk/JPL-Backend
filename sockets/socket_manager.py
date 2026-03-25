@@ -4,6 +4,7 @@ from core.utils import get_local_ip
 
 FRONTEND_PORT = 3000
 local_ip = get_local_ip()
+team_sockets = {}
 
 sio = socketio.AsyncServer(
     async_mode="asgi",

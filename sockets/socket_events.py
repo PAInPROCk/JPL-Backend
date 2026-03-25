@@ -1,10 +1,10 @@
-from sockets.socket_manager import sio
+from sockets.socket_manager import sio, team_sockets
 import asyncio
 from core.database import get_db_connection
 import pymysql
+from datetime import datetime, timezone, timedelta
 from auth.auth_handler import verify_token
 from decimal import Decimal
-
 
 MIN_INCREAMENT = 500
 
@@ -23,11 +23,27 @@ def register_socket_events():
     @sio.event
     async def disconnect(sid):
         print("❌ Socket Disconnected:", sid)
+        for team_id, socket_id in list(team_sockets.items()):
+            if socket_id == sid:
+                del team_sockets[team_id]
+                print(f"Removed team {team_id} socket mapping")
 
     @sio.event
     async def join_auction(sid, data=None):
         print("JOIN AUCTION EVENT TRIGGERED")
         print(f"📡 Client joined auction: {sid}")
+
+        team_id = None
+
+        if data:
+            team_id = data.get("team_id")  
+
+        #map only team sockets
+        if team_id:
+            team_sockets[team_id] = sid
+            print(f"Team {team_id} mapped to socket {sid}")
+        else:
+            print("Admin joined auction (no team mapping)")
 
         conn = get_db_connection()
         cursor = conn.cursor(pymysql.cursors.DictCursor)
@@ -59,7 +75,12 @@ def register_socket_events():
                     to = sid
                 )
                 return
-        
+            cursor.execute(
+                "SELECT purse FROM teams WHERE team_id=%s",
+                (team_id,)
+            )
+            row = cursor.fetchone()
+            updated_purse = float(row["purse"]) if row else 0
             #Fetch highest bid
             cursor.execute("""
                 SELECT b.team_id,t.name AS team_name, b.bid_amount
@@ -84,6 +105,7 @@ def register_socket_events():
                     "base_price": float(auction.get("base_price") or 0),
                     "highest_runs": auction.get("highest_runs") or 0
                 },
+                "team_purse": updated_purse,
                 "highest_bid": {
                     "team_id": top_bid["team_id"],
                     "team_name": top_bid["team_name"],
@@ -195,28 +217,80 @@ def register_socket_events():
                         to=sid
                     )
                     return
-
+                
                 # ---------------- PLAYER BASE PRICE ----------------
                 cursor.execute(
-                    "SELECT base_price FROM players WHERE id=%s",
+                    "SELECT base_price, category FROM players WHERE id=%s",
                     (active_player,)
                 )
 
                 player = cursor.fetchone()
+                if not player:
+                    await sio.emit(
+                        "bid_rejected",
+                        {"error": "Player not found"},
+                        to=sid
+                    )
+                    return
                 base_price = float(player.get("base_price") or 0) if player else 0
+                player_category = player["category"]
+                
+                cursor.execute("""
+                SELECT 1
+                FROM sold_players sp
+                JOIN players p ON sp.player_id = p.id
+                WHERE sp.team_id = %s AND p.category = %s
+                LIMIT 1
+                """, (team_id, player_category))
+
+                existing_category = cursor.fetchone()
+
+                if existing_category:
+                    await sio.emit(
+                        "bid_rejected",
+                        {"error": f"You already have a {player_category} category player"},
+                        to=sid
+                    )
+                    return
+                
+                #------------ Team Player Count ------------
+                cursor.execute("""
+                SELECT COUNT(*) AS total_players
+                FROM sold_players
+                WHERE team_id = %s
+                """, (team_id,))
+                team_count = cursor.fetchone()["total_players"]
+
+                if team_count >= 8:
+                    await sio.emit(
+                        "bid_rejected",
+                        {"error": "Team already completed (8 players)"},
+                        to=sid
+                    )
+                    return
+                
+                
 
                 # ---------------- CURRENT HIGHEST BID ----------------
-                cursor.execute(
-                    """
-                    SELECT MAX(bid_amount) AS highest_bid
-                    FROM live_bids
-                    WHERE player_id = %s
-                    """,
-                    (active_player,)
-                )
+                cursor.execute("""
+                SELECT team_id, bid_amount
+                FROM live_bids
+                WHERE player_id = %s
+                ORDER BY bid_amount DESC
+                LIMIT 1
+                """, (active_player,))
 
                 row = cursor.fetchone()
-                highest_bid = float(row["highest_bid"]) if row and row["highest_bid"] else 0
+
+                highest_bid = float(row["bid_amount"]) if row else 0
+
+                if row and str(row["team_id"]) == str(team_id):
+                    await sio.emit(
+                        "bid_rejected",
+                        {"error": "You already have the highest bid"},
+                        to=sid
+                    )
+                    return
 
                 MIN_INCREMENT = 500
 
@@ -318,6 +392,36 @@ def register_socket_events():
                     highest_bid_amount = float(highest["bid_amount"])
                 else:
                     highest_bid_amount = base_price
+
+
+                #----------- Timer Extension On last Second Bid --------------
+                cursor.execute("""
+                SELECT expires_at
+                FROM current_auction
+                LIMIT 1
+                """)
+
+                row = cursor.fetchone()
+
+                if row:
+                    expires_at = row["expires_at"]
+
+                    if expires_at.tzinfo is None:
+                        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+                    remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+                else:
+                    remaining = 0
+
+                if remaining <= 10:
+                    cursor.execute("""
+                    UPDATE current_auction
+                    SET expires_at = DATE_ADD(NOW(), INTERVAL 30 SECOND)
+                    """)
+
+                    await sio.emit("timer_extended", {
+                        "extra_time": 30
+                    })
                 # ---------- BROADCAST UPDATE ----------
                 await sio.emit("auction_update", {
                     "player_id": active_player,

@@ -3,7 +3,7 @@ from datetime import datetime, timezone, timedelta
 import pymysql
 
 from core.database import get_db_connection
-from sockets.socket_manager import sio
+from sockets.socket_manager import sio, team_sockets
 
 async def background_timer(player_id, mode, session_id):
 
@@ -102,6 +102,21 @@ async def background_timer(player_id, mode, session_id):
             SET purse = purse - %s
             WHERE team_id = %s
             """, (top_bid["bid_amount"], top_bid["team_id"]))
+
+            cursor.execute(
+                "SELECT purse FROM teams WHERE team_id=%s",
+                (top_bid["team_id"],)
+            )
+            row = cursor.fetchone()
+            updated_purse = float(row["purse"])
+            winner_sid = team_sockets.get(top_bid["team_id"])
+
+            if winner_sid:
+                await sio.emit(
+                    "purse_update",
+                    {"purse": updated_purse},
+                    to= winner_sid
+                )
 
             cursor.execute("""
             INSERT INTO sold_players
