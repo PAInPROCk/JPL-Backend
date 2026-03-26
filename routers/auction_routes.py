@@ -844,7 +844,7 @@ async def mark_sold(request: Request):
 
         # ---------- GET HIGHEST BID ----------
         cursor.execute("""
-            SELECT b.team_id, b.bid_amount, t.name AS team_name
+            SELECT b.team_id, b.bid_amount, t.name AS team_name, t.image_path
             FROM live_bids b
             JOIN teams t ON b.team_id = t.team_id
             WHERE b.player_id = %s
@@ -860,6 +860,7 @@ async def mark_sold(request: Request):
         sold_price = float(top["bid_amount"])
         team_id = top["team_id"]
         team_name = top["team_name"]
+        team_image = top["image_path"]
 
         # ---------- DEDUCT TEAM PURSE ----------
         cursor.execute(
@@ -924,7 +925,8 @@ async def mark_sold(request: Request):
             "team": {
                 "team_id": team_id,
                 "team_name": team_name,
-                "bid_amount": sold_price
+                "bid_amount": sold_price,
+                "image_path": team_image
             },
             "sold_price": sold_price,
             "message": f"Player sold to {team_name} for ₹{sold_price}"
@@ -978,19 +980,19 @@ async def mark_sold(request: Request):
         conn.commit()
         
         await sio.emit("auction_started", {
-    "player_id": next_player["id"],
-    "player_name": next_player["name"],
-    "mode": "random",
-    "duration": duration,
-    "expires_at": expires_at.isoformat()
-})
+            "player_id": next_player["id"],
+            "player_name": next_player["name"],
+            "mode": "random",
+            "duration": duration,
+            "expires_at": expires_at.isoformat()
+        })
         asyncio.create_task(
-    background_timer(
-        next_player["id"],
-        "random",
-        session_id
-    )
-)
+            background_timer(
+                next_player["id"],
+                "random",
+                session_id
+            )
+        )
         print(f"🚀 Next auction started for {next_player['name']}")
 
         return {

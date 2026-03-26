@@ -64,7 +64,7 @@ async def background_timer(player_id, mode, session_id):
             "server_time": now.isoformat()
         })
 
-        await asyncio.sleep(0.9)
+        await asyncio.sleep(1)
 
     print("⏰ Timer expired")
 

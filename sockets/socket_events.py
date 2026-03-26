@@ -413,14 +413,17 @@ def register_socket_events():
                 else:
                     remaining = 0
 
-                if remaining <= 10:
+                if 0 < remaining <= 10:
                     cursor.execute("""
                     UPDATE current_auction
-                    SET expires_at = DATE_ADD(NOW(), INTERVAL 30 SECOND)
+                    SET expires_at = DATE_ADD(expires_at, INTERVAL 30 SECOND)
                     """)
+                    conn.commit()
 
-                    await sio.emit("timer_extended", {
-                        "extra_time": 30
+                    print("⏱ Auction timer extended by 30 seconds")
+                    await sio.emit("timer_update", {
+                        "remaining_seconds": 30,
+                        "extended": True
                     })
                 # ---------- BROADCAST UPDATE ----------
                 await sio.emit("auction_update", {
