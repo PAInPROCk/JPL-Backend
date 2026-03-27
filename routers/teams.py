@@ -76,6 +76,7 @@ def get_team_by_id(team_id: int):
                 p.name,
                 p.category,
                 p.type,
+                p.image_path,
                 sp.sold_price,
                 sp.sold_time
             FROM sold_players sp
