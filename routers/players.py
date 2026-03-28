@@ -33,38 +33,46 @@ def get_players():
 
         cursor.execute(
             """SELECT 
-                    p.id AS player_id,
-                    p.name,
-                    p.nickname,
-                    p.jersey,
-                    p.category,
-                    p.type,
-                    p.image_path,
-                    p.base_price,
-                    p.total_runs,
-                    p.highest_runs,
-                    p.wickets_taken,
-                    p.times_out,
-                    COALESCE(GROUP_CONCAT(DISTINCT t.name ORDER BY t.name SEPARATOR ', '), '') AS teams_played
-                FROM players p
-                LEFT JOIN player_teams pt 
-                    ON p.id = pt.player_id
-                LEFT JOIN teams t 
-                    ON pt.team_id = t.team_id
-                GROUP BY 
-                    p.id,
-                    p.name,
-                    p.nickname,
-                    p.jersey,
-                    p.category,
-                    p.type,
-                    p.image_path,
-                    p.base_price,
-                    p.total_runs,
-                    p.highest_runs,
-                    p.wickets_taken,
-                    p.times_out
-                ORDER BY p.name;"""
+    p.id AS player_id,
+    p.name,
+    p.nickname,
+    p.jersey,
+    p.category,
+    p.type,
+    p.image_path,
+    p.base_price,
+    p.total_runs,
+    p.highest_runs,
+    p.wickets_taken,
+    p.times_out,
+    COALESCE(GROUP_CONCAT(DISTINCT t.name ORDER BY t.name SEPARATOR ', '), '') AS teams_played,
+    'player' AS role
+FROM players p
+LEFT JOIN player_teams pt ON p.id = pt.player_id
+LEFT JOIN teams t ON pt.team_id = t.team_id
+GROUP BY p.id
+
+UNION ALL
+
+SELECT 
+    c.id AS player_id,
+    c.name,
+    NULL AS nickname,
+    NULL AS jersey,
+    'Captain' AS category,
+    NULL AS type,
+    c.image_path,
+    NULL AS base_price,
+    NULL AS total_runs,
+    NULL AS highest_runs,
+    NULL AS wickets_taken,
+    NULL AS times_out,
+    t.name AS teams_played,
+    'captain' AS role
+FROM captains c
+LEFT JOIN teams t ON c.team_id = t.team_id
+
+ORDER BY name;"""
         )
 
         rows = cursor.fetchall()
@@ -131,13 +139,29 @@ def players_with_teams():
         conn.close()
 
 @router.get("/players/{player_id}")
-async def get_player(player_id: int):
+async def get_player(player_id: int, role: str):
 
     conn = get_db_connection()
     cursor = conn.cursor(pymysql.cursors.DictCursor)
 
     try:
 
+        if role == "captain":
+            cursor.execute(
+                "SELECT id, name, team_id, image_path FROM captains WHERE id=%s",
+                (player_id,)
+            )
+            captain = cursor.fetchone()
+
+            if not captain:
+                raise HTTPException(status_code=404, detail="Captain not found")
+
+            return {
+                "type": "captain",
+                "data": captain
+            }
+
+        # default → player
         cursor.execute(
             "SELECT * FROM players WHERE id=%s",
             (player_id,)
@@ -148,11 +172,14 @@ async def get_player(player_id: int):
         if not player:
             raise HTTPException(status_code=404, detail="Player not found")
 
-        return player
+        return {
+            "type": "player",
+            "data": player
+        }
 
     finally:
         cursor.close()
-        conn.close()        
+        conn.close()
 
 @router.post("/upload-player-image")
 async def upload_player_image(

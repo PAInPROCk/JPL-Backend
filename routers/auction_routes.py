@@ -1117,3 +1117,62 @@ async def mark_unsold(request: Request):
     finally:
         cursor.close()
         conn.close()
+
+@router.get("/auction-state")
+async def auction_state():
+
+    conn = get_db_connection()
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+
+    try:
+        cursor.execute("SELECT * FROM current_auction LIMIT 1")
+        auction = cursor.fetchone()
+
+        if not auction:
+            return {"status": "no_auction"}
+        
+        player_id = auction["player_id"]
+
+        #Fetch Player
+        cursor.execute("""
+            SELECT id, name, category, type, image_path, base_price
+            FROM players
+            WHERE id=%s
+        """, (player_id,))
+
+        player = cursor.fetchone()
+
+        #Highest bid
+        cursor.execute("""
+            SELECT b.team_id, b.bid_amount, t.name AS team_name, t.image_path
+            FROM live_bids b
+            JOIN teams t ON b.team_id = t.team_id
+            WHERE b.player_id = %s
+            ORDER BY b.bid_amount DESC
+            LIMIT 1
+        """, (player_id,))
+
+        highest = cursor.fetchall()
+
+        #Bid History
+        cursor.execute("""
+            SELECT b.team_id, t.name AS team_name, b.bid_amount, b.bid_time
+            FROM bids b
+            JOIN teams t ON b.team_id = t.team_id
+            WHERE b.player_id = %s
+            ORDER BY b.bid_time ASC
+        """,(player_id,))
+
+        history = cursor.fetchall()
+        return{
+            "status": "active",
+            "paused": bool(auction["paused"]),
+            "paused_remaining": auction["paused_remaining"],
+            "expires_at": auction["expires_at"],
+            "player": player,
+            "highest_bid": highest,
+            "history": history
+        }
+    finally:
+        cursor.close()
+        conn.close()

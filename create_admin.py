@@ -11,11 +11,11 @@ db = pymysql.connect(
 cursor = db.cursor()
 
 # Step 2: Admin credentials
-name = "JPL Warriors 2"
-email = "team5@example.com"       # change if you want
+name = "JPL Admin"
+email = "admin2@example.com"       # change if you want
 plain_password = "12345"           # change if you want
-role = "team"
-team_id = 5 
+role = "admin"
+team_id = None 
 
 # Step 3: Hash the password
 hashed_password = bcrypt.hashpw(plain_password.encode('utf-8'), bcrypt.gensalt())
