@@ -20,3 +20,6 @@ Thumbs.db
 
 #images
 uploads/
+
+#env
+.env
