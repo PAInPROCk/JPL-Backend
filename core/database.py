@@ -1,16 +1,16 @@
 import pymysql
-
+import os
 
 def get_db_connection():
     try:
         print("🔌 Attempting DB Connection...")
 
         conn = pymysql.connect(
-            host="127.0.0.1",
-            user="root",
-            password="",
-            database="jpl",
-            port=3306,
+            host=os.getenv("MYSQLHOST"),
+            user=os.getenv("MYSQLUSER"),
+            password=os.getenv("MYSQLPASSWORD"),
+            database=os.getenv("MYSQLDATABASE"),
+            port=int(os.getenv("MYSQLPORT")),
             connect_timeout=5,
             cursorclass=pymysql.cursors.DictCursor
         )
