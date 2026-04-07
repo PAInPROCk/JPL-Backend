@@ -31,7 +31,7 @@ def get_teams():
                 team_id,
                 name,
                 captain,
-                `Team_Rank` AS rank,
+                `Team_Rank` AS trank,
                 Total_Budget AS total_budget,
                 Season_Budget AS current_budget,
                 Players_Bought AS players_bought,
