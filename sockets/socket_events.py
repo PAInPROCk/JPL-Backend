@@ -3,7 +3,7 @@ import asyncio
 from core.database import get_db_connection
 import pymysql
 from datetime import datetime, timezone, timedelta
-from auth.auth_handler import verify_token
+from auth.auth_handler import verify_token, get_token_from_request
 from decimal import Decimal
 
 MIN_INCREAMENT = 500
