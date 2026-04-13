@@ -1,5 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, Request, Form
-from auth.auth_handler import verify_token
+from auth.auth_handler import verify_token, get_token_from_request
 from core.database import get_db_connection
 import pymysql
 import os
@@ -120,7 +120,7 @@ async def add_team(
     image: Optional[UploadFile] = File(None)
 ):
     # ================= AUTH =================
-    token = request.cookies.get("access_token")
+    token = get_token_from_request(request)
 
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")

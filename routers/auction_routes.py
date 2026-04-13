@@ -5,7 +5,7 @@ import asyncio
 from decimal import Decimal
 from auction.auction_engine import background_timer
 from core.database import get_db_connection
-from auth.auth_handler import verify_token
+from auth.auth_handler import verify_token, get_token_from_request
 from sockets.socket_manager import sio, team_sockets
 from models.schemas import StartAuctionRequest
 
@@ -14,8 +14,8 @@ router = APIRouter()
 @router.post("/start-auction")
 async def start_auction(data: StartAuctionRequest, request: Request):
 
-    token = request.cookies.get("access_token")
-
+    token = get_token_from_request(request)
+    
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -192,7 +192,7 @@ def seconds_remaining(expires_at):
 @router.get("/current-auction")
 async def get_current_auction(request: Request):
 
-    token = request.cookies.get("access_token")
+    token = get_token_from_request(request)
 
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -341,7 +341,7 @@ async def get_current_auction(request: Request):
 async def pause_auction(request: Request):
 
     # ---------- AUTH CHECK ----------
-    token = request.cookies.get("access_token")
+    token = get_token_from_request(request)
 
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -426,7 +426,7 @@ async def pause_auction(request: Request):
 async def resume_auction(request: Request):
 
     # ------------- AUTH CHECK -------------
-    token = request.cookies.get("access_token")
+    token = get_token_from_request(request)
 
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -517,7 +517,7 @@ async def resume_auction(request: Request):
 @router.post("/next-auction")
 async def next_auction(request: Request):
 
-    token = request.cookies.get("access_token")
+    token = get_token_from_request(request)
 
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -571,7 +571,7 @@ async def next_auction(request: Request):
 async def cancel_auction(request: Request):
 
     # ---------- AUTH CHECK ----------
-    token = request.cookies.get("access_token")
+    token = get_token_from_request(request)
 
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -661,7 +661,7 @@ async def cancel_auction(request: Request):
 @router.get("/auction-state")
 async def auction_state(request: Request):
 
-    token = request.cookies.get("access_token")
+    token = get_token_from_request(request)
 
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -816,7 +816,7 @@ async def auction_status():
 async def mark_sold(request: Request):
 
     # ---------- AUTH CHECK ----------
-    token = request.cookies.get("access_token")
+    token = get_token_from_request(request)
 
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -1021,7 +1021,7 @@ async def mark_sold(request: Request):
 async def mark_unsold(request: Request):
 
     # ---------- AUTH CHECK ----------
-    token = request.cookies.get("access_token")
+    token = get_token_from_request(request)
 
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")

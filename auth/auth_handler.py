@@ -22,3 +22,13 @@ def verify_token(token: str):
     
     except JWTError:
         return None
+    
+def get_token_from_request(request):
+    # 1️⃣ Check Authorization header (Android)
+    auth_header = request.headers.get("Authorization")
+
+    if auth_header and auth_header.startswith("Bearer "):
+        return auth_header.split(" ")[1]
+
+    # 2️⃣ Fallback to Cookie (Web)
+    return request.cookies.get("access_token")
