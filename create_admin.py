@@ -1,18 +1,22 @@
 import pymysql
 import bcrypt
+import os
 
 # Step 1: Connect to your database
 db = pymysql.connect(
-    host="localhost",        # change if needed
-    user="root",             # change if needed
-    password="",             # change if needed
-    database="jpl"           # your DB name
+    host=os.getenv("MYSQLHOST"),
+            user=os.getenv("MYSQLUSER"),
+            password=os.getenv("MYSQLPASSWORD"),
+            database=os.getenv("MYSQLDATABASE"),
+            port=int(os.getenv("MYSQLPORT")),
+            connect_timeout=5,
+            cursorclass=pymysql.cursors.DictCursor
 )
 cursor = db.cursor()
 
 # Step 2: Admin credentials
-name = "JPL Admin"
-email = "admin2@example.com"       # change if you want
+name = "JPL Admin 3"
+email = "admin3@example.com"       # change if you want
 plain_password = "12345"           # change if you want
 role = "admin"
 team_id = None 
