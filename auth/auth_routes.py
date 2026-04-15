@@ -2,7 +2,7 @@ from fastapi import APIRouter, Response, Request, HTTPException
 import bcrypt
 
 from core.database import get_db_connection
-from auth.auth_handler import create_access_token, verify_token
+from auth.auth_handler import create_access_token, verify_token, get_token_from_request
 
 router = APIRouter()
 
@@ -55,6 +55,7 @@ def login(data: dict, response: Response):
 
     return{
         "message": "Login Successful",
+        "token": token,
         "user": {
             "id": user["id"],
             "name": user["name"],
@@ -75,7 +76,7 @@ def logout(response: Response):
 #-------------CHECK AUTH--------------
 @router.get("/check-auth")
 def check_auth(request: Request):
-    token = request.cookies.get("access_token")
+    token = get_token_from_request(request)
     if not token:
         return {"Aunthenticated": False}
     
