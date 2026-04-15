@@ -19,7 +19,7 @@ Thumbs.db
 *.log
 
 #images
-uploads/
+# uploads/
 
 #env
 .env
