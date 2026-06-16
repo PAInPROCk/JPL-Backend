@@ -19,6 +19,21 @@ def register_socket_events():
     @sio.event
     async def connect(sid, eviron):
         print("✅ Socket Connected:", sid)
+        from urllib.parse import parse_qs
+        from auth.auth_handler import verify_token
+        
+        query_string = eviron.get("QUERY_STRING", "")
+        params = parse_qs(query_string)
+        token_list = params.get("token")
+        
+        if token_list:
+            token = token_list[0]
+            user = verify_token(token)
+            if user:
+                await sio.save_session(sid, {"user": user})
+                print(f"🔒 Authenticated socket {sid} for user {user.get('email')}")
+            else:
+                print(f"⚠️ Invalid token provided on socket connect for {sid}")
 
     @sio.event
     async def disconnect(sid):
@@ -124,8 +139,33 @@ def register_socket_events():
     async def place_bid(sid, data):
 
         async with bid_lock:
+            from auth.auth_handler import verify_token
             
-            team_id = data.get("team_id")
+            # Fetch user session info if authenticated
+            session = await sio.get_session(sid)
+            user = session.get("user") if session else None
+            
+            # Fallback to token inside payload if not authenticated during connection
+            if not user and data.get("token"):
+                user = verify_token(data.get("token"))
+                if user:
+                    await sio.save_session(sid, {"user": user})
+            
+            # If user is authenticated, override team_id with the token's team_id
+            if user:
+                if user.get("role") == "team":
+                    team_id = user.get("team_id")
+                    if not team_id:
+                        await sio.emit("bid_rejected", {"error": "User is not assigned to any team"}, to=sid)
+                        return
+                else:
+                    # Admins or other roles get team_id from data directly (for testing/mocking)
+                    team_id = data.get("team_id")
+            else:
+                # If no authentication is provided, print warning
+                team_id = data.get("team_id")
+                print(f"⚠️ Unauthenticated bid placed by socket {sid} claiming team {team_id}")
+            
             player_id = data.get("player_id")
             bid_value = data.get("bid_amount")
 
@@ -310,8 +350,8 @@ def register_socket_events():
                     INSERT INTO live_bids
                     (player_id, team_id, bid_amount, bid_time)
                     VALUES (%s,%s,%s,NOW())
-                    ON DUPLICATE KEY UPDATE
-                        bid_amount = VALUES(bid_amount),
+                    ON CONFLICT (player_id) DO UPDATE SET
+                        bid_amount = EXCLUDED.bid_amount,
                         bid_time = NOW()
                     """,
                     (
@@ -416,8 +456,9 @@ def register_socket_events():
                 if 0 < remaining <= 10:
                     cursor.execute("""
                     UPDATE current_auction
-                    SET expires_at = DATE_ADD(expires_at, INTERVAL 30 SECOND)
-                    """)
+                    SET expires_at = expires_at + INTERVAL '30 seconds'
+                    WHERE player_id = %s
+                    """, (active_player,))
                     conn.commit()
 
                     print("⏱ Auction timer extended by 30 seconds")

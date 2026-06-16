@@ -1,8 +1,14 @@
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
 
-SECRET_KEY = "JPL_SECRET_KEY"
-ALGORITHM ="HS256"
+import os
+from dotenv import load_dotenv
+
+# Load env variables
+load_dotenv()
+
+SECRET_KEY = os.getenv("SUPABASE_JWT_SECRET", "JPL_SECRET_KEY")
+ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOUR = 6
 
 def create_access_token(data: dict):
@@ -17,10 +23,20 @@ def create_access_token(data: dict):
 
 def verify_token(token: str):
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=ALGORITHM)
-        return payload
+        # Decode using the Supabase JWT Secret and verify the audience is 'authenticated'
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], audience="authenticated")
+        
+        # Map Supabase claims to the dictionary keys expected by the application
+        return {
+            "id": payload.get("sub"),
+            "email": payload.get("email"),
+            "role": payload.get("app_metadata", {}).get("role", "team"),
+            "team_id": payload.get("user_metadata", {}).get("team_id"),
+            "name": payload.get("user_metadata", {}).get("name", "")
+        }
     
-    except JWTError:
+    except JWTError as e:
+        print("❌ Token decode error:", e)
         return None
     
 def get_token_from_request(request):

@@ -216,7 +216,7 @@ async def background_timer(player_id, mode, session_id):
             UNION
             SELECT player_id FROM unsold_players
         )
-        ORDER BY RAND()
+        ORDER BY RANDOM()
         LIMIT 1
         """)
 

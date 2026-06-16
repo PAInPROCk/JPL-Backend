@@ -20,6 +20,12 @@ Thumbs.db
 
 #images
 # uploads/
-
+uploads/
 #env
 .env
+
+#Documentation
+Docs/
+
+#text
+*.txt

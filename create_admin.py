@@ -1,16 +1,20 @@
 import pymysql
 import bcrypt
 import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Step 1: Connect to your database
 db = pymysql.connect(
-    host=os.getenv("MYSQLHOST"),
-            user=os.getenv("MYSQLUSER"),
-            password=os.getenv("MYSQLPASSWORD"),
-            database=os.getenv("MYSQLDATABASE"),
-            port=int(os.getenv("MYSQLPORT")),
-            connect_timeout=5,
-            cursorclass=pymysql.cursors.DictCursor
+    host=os.getenv("MYSQLHOST", "127.0.0.1"),
+    user=os.getenv("MYSQLUSER", "root"),
+    password=os.getenv("MYSQLPASSWORD", ""),
+    database=os.getenv("MYSQLDATABASE", "jpl"),
+    port=int(os.getenv("MYSQLPORT", 3306)),
+    connect_timeout=5,
+    cursorclass=pymysql.cursors.DictCursor
 )
 cursor = db.cursor()
 

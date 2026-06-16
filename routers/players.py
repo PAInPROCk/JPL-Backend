@@ -8,8 +8,6 @@ import zipfile
 import csv
 import tempfile
 import shutil
-import pandas as pd
-import numpy as np
 
 
 from typing import List, Optional
@@ -45,7 +43,7 @@ def get_players():
     p.highest_runs,
     p.wickets_taken,
     p.times_out,
-    COALESCE(GROUP_CONCAT(DISTINCT t.name ORDER BY t.name SEPARATOR ', '), '') AS teams_played,
+    COALESCE(string_agg(DISTINCT t.name, ', ' ORDER BY t.name), '') AS teams_played,
     'player' AS role
 FROM players p
 LEFT JOIN player_teams pt ON p.id = pt.player_id
@@ -113,7 +111,7 @@ def players_with_teams():
                 p.type,
                 p.image_path,
                 p.base_price,
-                GROUP_CONCAT(t.name SEPARATOR ', ') AS teams_played
+                 string_agg(t.name, ', ') AS teams_played
             FROM players p
             LEFT JOIN player_teams pt ON p.id = pt.player_id
             LEFT JOIN teams t ON pt.team_id = t.team_id
@@ -379,12 +377,29 @@ async def upload_players(request: Request, file: UploadFile = File(...)):
         raise HTTPException(400, "Excel file not found in ZIP")
 
     # ---------- READ EXCEL ----------
-    df = pd.read_excel(excel_file)
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(excel_file, data_only=True)
+        sheet = wb.active
 
-    # 🔥 IMPORTANT FIX
-    df = df.replace({np.nan: None})
+        # Extract headers (first row)
+        headers = [cell.value for cell in sheet[1]]
 
-    records = df.to_dict(orient="records")
+        records = []
+        for r_idx in range(2, sheet.max_row + 1):
+            row_vals = [sheet.cell(row=r_idx, column=c_idx).value for c_idx in range(1, len(headers) + 1)]
+            
+            # Skip empty rows
+            if not any(row_vals):
+                continue
+                
+            record = {}
+            for header, val in zip(headers, row_vals):
+                if header:
+                    record[header] = val
+            records.append(record)
+    except Exception as exc:
+        raise HTTPException(400, f"Error reading Excel file: {exc}")
 
     # ---------- MOVE IMAGES ----------
     images_folder = os.path.join(temp_dir, "images")
