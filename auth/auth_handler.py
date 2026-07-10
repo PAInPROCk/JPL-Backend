@@ -22,21 +22,39 @@ def create_access_token(data: dict):
     return token
 
 def verify_token(token: str):
-    try:
-        # Decode using the Supabase JWT Secret and verify the audience is 'authenticated'
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], audience="authenticated")
+    if not token:
+        return None
         
-        # Map Supabase claims to the dictionary keys expected by the application
+    try:
+        from supabase import create_client
+        import os
+        
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY")
+        
+        if supabase_key and supabase_key.startswith("sb_"):
+            # Use the full JWT anon key if the publishable key starts with sb_
+            supabase_key = os.getenv("SUPABASE_ANON_KEY")
+            
+        supabase = create_client(supabase_url, supabase_key)
+        
+        # Verify the token via Supabase Auth API
+        res = supabase.auth.get_user(token)
+        user = res.user
+        
+        if not user:
+            return None
+            
         return {
-            "id": payload.get("sub"),
-            "email": payload.get("email"),
-            "role": payload.get("app_metadata", {}).get("role", "team"),
-            "team_id": payload.get("user_metadata", {}).get("team_id"),
-            "name": payload.get("user_metadata", {}).get("name", "")
+            "id": user.id,
+            "email": user.email,
+            "role": user.app_metadata.get("role", "team") if user.app_metadata else "team",
+            "team_id": user.user_metadata.get("team_id") if user.user_metadata else None,
+            "name": user.user_metadata.get("name", "") if user.user_metadata else ""
         }
     
-    except JWTError as e:
-        print("❌ Token decode error:", e)
+    except Exception as e:
+        print("❌ Token verification failed via Supabase API:", e)
         return None
     
 def get_token_from_request(request):

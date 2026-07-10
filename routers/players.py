@@ -202,6 +202,8 @@ async def upload_player_image(
 
     filename = f"{uuid.uuid4().hex}.{ext}"
 
+    os.makedirs(UPLOAD_FOLDER_PLAYERS, exist_ok=True)
+
     filepath = os.path.join(UPLOAD_FOLDER_PLAYERS, filename)
 
     with open(filepath, "wb") as buffer:
@@ -282,6 +284,9 @@ async def add_player(
 
     # ================= DB =================
     conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
     cursor = conn.cursor(pymysql.cursors.DictCursor)
 
     try:
@@ -289,8 +294,9 @@ async def add_player(
         cursor.execute("""
             INSERT INTO players 
             (name, nickname, age, category, type, base_price, total_runs, highest_runs, 
-             wickets_taken, times_out, image_path, jersey, mobile_No, email_Id)
+             wickets_taken, times_out, image_path, jersey, mobile_no, email_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
         """, (
             full_name,
             nickName,
@@ -308,7 +314,8 @@ async def add_player(
             emailId
         ))
 
-        player_id = cursor.lastrowid
+        inserted_player = cursor.fetchone()
+        player_id = inserted_player["id"]
 
         # -------- INSERT PLAYER-TEAMS --------
         for team_id in teams:
@@ -414,6 +421,9 @@ async def upload_players(request: Request, file: UploadFile = File(...)):
 
     # ---------- DB INSERT ----------
     conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
     cursor = conn.cursor()
 
     try:
@@ -427,7 +437,7 @@ async def upload_players(request: Request, file: UploadFile = File(...)):
             cursor.execute("""
                 INSERT INTO players (
                     name, nickname, age, gender, category, jersey, type,
-                    mobile_No, email_Id, base_price,
+                    mobile_no, email_id, base_price,
                     total_runs, highest_runs, wickets_taken,
                     times_out, teams_played, image_path
                 )

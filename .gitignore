@@ -29,3 +29,6 @@ Docs/
 
 #text
 *.txt
+
+#Errors
+Errors/

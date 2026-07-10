@@ -6,15 +6,31 @@ from auth.auth_handler import create_access_token, verify_token, get_token_from_
 
 router = APIRouter()
 
+def get_supabase_client():
+    from supabase import create_client
+    import os
+
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY")
+
+    if not supabase_url:
+        raise RuntimeError("SUPABASE_URL is missing from backend .env")
+
+    if not supabase_key:
+        raise RuntimeError("SUPABASE_ANON_KEY or SUPABASE_KEY is missing from backend .env")
+
+    if supabase_key.startswith("sb_"):
+        raise RuntimeError(
+            "SUPABASE_KEY appears to be a publishable key. Use the Supabase anon public JWT key instead."
+        )
+
+    return create_client(supabase_url, supabase_key)
+
 #------------LOGIN------------
 @router.post("/login")
 def login(data: dict, response: Response):
     try:
-        from supabase import create_client
-        import os
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_KEY")
-        supabase = create_client(supabase_url, supabase_key)
+        supabase = get_supabase_client()
         
         # Authenticate user via Supabase Auth
         auth_response = supabase.auth.sign_in_with_password({

@@ -392,7 +392,7 @@ async def pause_auction(request: Request):
         # ---------- UPDATE DB ----------
         cursor.execute("""
             UPDATE current_auction
-            SET paused = 1,
+            SET paused = true,
                 paused_remaining = %s
             WHERE player_id = %s
         """, (remaining, player_id))
@@ -449,7 +449,7 @@ async def resume_auction(request: Request):
         cursor.execute("""
             SELECT player_id, paused_remaining, mode
             FROM current_auction
-            WHERE paused = 1
+            WHERE paused = true
             LIMIT 1
         """)
 
@@ -468,7 +468,7 @@ async def resume_auction(request: Request):
 
         cursor.execute("""
             UPDATE current_auction
-            SET paused = 0,
+            SET paused = false,
                 paused_remaining = NULL,
                 expires_at = %s
             WHERE player_id = %s

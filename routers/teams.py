@@ -31,10 +31,10 @@ def get_teams():
                 team_id,
                 name,
                 captain,
-                `Team_Rank` AS trank,
-                Total_Budget AS total_budget,
-                Season_Budget AS current_budget,
-                Players_Bought AS players_bought,
+                team_rank AS trank,
+                total_budget AS total_budget,
+                season_budget AS current_budget,
+                players_bought AS players_bought,
                 image_path
             FROM teams
             ORDER BY name ASC
@@ -161,13 +161,16 @@ async def add_team(
 
     # ================= DB =================
     conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
     cursor = conn.cursor(pymysql.cursors.DictCursor)
 
     try:
         cursor.execute("""
             INSERT INTO teams 
-            (name, captain, mobile_No, email_Id, Team_Rank, Total_Budget, Season_Budget, Players_Bought, image_path)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (name, captain, mobile_no, email_id, team_rank, total_budget, season_budget, purse, players_bought, image_path)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             teamName,
             captain,
@@ -175,6 +178,7 @@ async def add_team(
             emailId,
             teamRank,
             totalBudget,
+            seasonBudget,
             seasonBudget,
             playersBought,
             image_path
