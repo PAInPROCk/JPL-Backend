@@ -3,6 +3,7 @@ from auth.auth_handler import verify_token, get_token_from_request
 from core.database import get_db_connection
 import pymysql
 import os
+import io
 import uuid
 from typing import Optional
 
@@ -138,20 +139,21 @@ async def add_team(
     image_path = None
 
     if image:
-        ext = image.filename.split(".")[-1].lower()
-
-        if ext not in ALLOWED_EXTENSIONS:
-            raise HTTPException(status_code=400, detail="Invalid image format")
-
-        os.makedirs(UPLOAD_FOLDER_TEAMS, exist_ok=True)
-
-        filename = f"{uuid.uuid4().hex}.{ext}"
-        filepath = os.path.join(UPLOAD_FOLDER_TEAMS, filename)
-
-        with open(filepath, "wb") as f:
-            f.write(await image.read())
-
-        image_path = f"uploads/teams/{filename}"
+        try:
+            from PIL import Image
+            from core.image_handler import crop_and_resize_to_square, compress_to_webp, upload_image_to_supabase
+            
+            img_content = await image.read()
+            pil_image = Image.open(io.BytesIO(img_content))
+            processed_image = crop_and_resize_to_square(pil_image, 400)
+            webp_bytes = compress_to_webp(processed_image)
+            
+            filename = f"{uuid.uuid4().hex}.webp"
+            storage_path = f"teams/{filename}"
+            image_path = upload_image_to_supabase(webp_bytes, storage_path)
+        except Exception as e:
+            print("❌ Error processing/uploading team logo in add_team:", e)
+            raise HTTPException(status_code=500, detail=f"Image upload failed: {str(e)}")
 
     # ================= NORMALIZE VALUES =================
     teamRank = teamRank or 0

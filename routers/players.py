@@ -3,6 +3,7 @@ from auth.auth_handler import verify_token, get_token_from_request
 from core.database import get_db_connection
 import pymysql
 import os
+import io
 import uuid
 import zipfile
 import csv
@@ -19,7 +20,8 @@ UPLOAD_FOLDER_PLAYERS = "uploads/players"
 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
 
-@router.get("/players")
+@router.get("/" \
+"players")
 def get_players():
     conn = get_db_connection()
 
@@ -195,23 +197,26 @@ async def upload_player_image(
     if not image.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
-    ext = image.filename.split(".")[-1].lower()
-
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="Invalid file type")
-
-    filename = f"{uuid.uuid4().hex}.{ext}"
-
-    os.makedirs(UPLOAD_FOLDER_PLAYERS, exist_ok=True)
-
-    filepath = os.path.join(UPLOAD_FOLDER_PLAYERS, filename)
-
-    with open(filepath, "wb") as buffer:
-        buffer.write(await image.read())
-
-    return {
-        "image_path": f"uploads/players/{filename}"
-    }
+    img_content = await image.read()
+    
+    try:
+        from PIL import Image
+        from core.image_handler import crop_and_resize_to_square, compress_to_webp, upload_image_to_supabase
+        
+        pil_image = Image.open(io.BytesIO(img_content))
+        processed_image = crop_and_resize_to_square(pil_image, 500)
+        webp_bytes = compress_to_webp(processed_image)
+        
+        filename = f"{uuid.uuid4().hex}.webp"
+        storage_path = f"players/{filename}"
+        public_url = upload_image_to_supabase(webp_bytes, storage_path)
+        
+        return {
+            "image_path": public_url
+        }
+    except Exception as e:
+        print("❌ Error processing/uploading player image:", e)
+        raise HTTPException(status_code=500, detail=f"Image upload failed: {str(e)}")
 
 
 
@@ -267,20 +272,21 @@ async def add_player(
     image_path = None
 
     if image:
-        ext = image.filename.split(".")[-1].lower()
-
-        if ext not in ALLOWED_EXTENSIONS:
-            raise HTTPException(status_code=400, detail="Invalid image format")
-
-        os.makedirs(UPLOAD_FOLDER_PLAYERS, exist_ok=True)
-
-        filename = f"{uuid.uuid4().hex}.{ext}"
-        filepath = os.path.join(UPLOAD_FOLDER_PLAYERS, filename)
-
-        with open(filepath, "wb") as f:
-            f.write(await image.read())
-
-        image_path = f"uploads/players/{filename}"
+        try:
+            from PIL import Image
+            from core.image_handler import crop_and_resize_to_square, compress_to_webp, upload_image_to_supabase
+            
+            img_content = await image.read()
+            pil_image = Image.open(io.BytesIO(img_content))
+            processed_image = crop_and_resize_to_square(pil_image, 500)
+            webp_bytes = compress_to_webp(processed_image)
+            
+            filename = f"{uuid.uuid4().hex}.webp"
+            storage_path = f"players/{filename}"
+            image_path = upload_image_to_supabase(webp_bytes, storage_path)
+        except Exception as e:
+            print("❌ Error processing/uploading player image in add_player:", e)
+            raise HTTPException(status_code=500, detail=f"Image upload failed: {str(e)}")
 
     # ================= DB =================
     conn = get_db_connection()
@@ -331,8 +337,9 @@ async def add_player(
             "player_id": player_id
         }
 
-    except pymysql.IntegrityError:
+    except pymysql.IntegrityError as e:
         conn.rollback()
+        print("[DB Error] IntegrityError in add_player:", e)
         raise HTTPException(
             status_code=400,
             detail="Player with same name or jersey number exists"
@@ -408,16 +415,10 @@ async def upload_players(request: Request, file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(400, f"Error reading Excel file: {exc}")
 
-    # ---------- MOVE IMAGES ----------
+    # ---------- PROCESS AND UPLOAD IMAGES TO SUPABASE ----------
     images_folder = os.path.join(temp_dir, "images")
-
-    os.makedirs(UPLOAD_FOLDER_PLAYERS, exist_ok=True)
-
-    if os.path.exists(images_folder):
-        for img in os.listdir(images_folder):
-            src = os.path.join(images_folder, img)
-            dst = os.path.join(UPLOAD_FOLDER_PLAYERS, img)
-            shutil.move(src, dst)
+    from PIL import Image
+    from core.image_handler import crop_and_resize_to_square, compress_to_webp, upload_image_to_supabase
 
     # ---------- DB INSERT ----------
     conn = get_db_connection()
@@ -432,7 +433,24 @@ async def upload_players(request: Request, file: UploadFile = File(...)):
                 continue
 
             image_name = row.get("image_name")
-            image_path = f"{UPLOAD_FOLDER_PLAYERS}/{image_name}" if image_name else None
+            image_path = None
+            
+            if image_name and os.path.exists(images_folder):
+                local_img_path = os.path.join(images_folder, image_name)
+                if os.path.exists(local_img_path):
+                    try:
+                        with open(local_img_path, "rb") as img_file:
+                            img_content = img_file.read()
+                        
+                        pil_image = Image.open(io.BytesIO(img_content))
+                        processed_image = crop_and_resize_to_square(pil_image, 500)
+                        webp_bytes = compress_to_webp(processed_image)
+                        
+                        filename = f"{uuid.uuid4().hex}.webp"
+                        storage_path = f"players/{filename}"
+                        image_path = upload_image_to_supabase(webp_bytes, storage_path)
+                    except Exception as e:
+                        print(f"❌ Failed to process zip image {image_name}: {e}")
 
             cursor.execute("""
                 INSERT INTO players (
@@ -473,3 +491,8 @@ async def upload_players(request: Request, file: UploadFile = File(...)):
     finally:
         cursor.close()
         conn.close()
+        if os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as rmtree_err:
+                print(f"⚠️ Error cleaning up temp dir: {rmtree_err}")

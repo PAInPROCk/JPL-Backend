@@ -18,7 +18,7 @@ def normalize_decimal(obj):
 def register_socket_events():
     @sio.event
     async def connect(sid, eviron):
-        print("✅ Socket Connected:", sid)
+        print("[Socket] Connected:", sid)
         from urllib.parse import parse_qs
         from auth.auth_handler import verify_token
         
@@ -31,22 +31,22 @@ def register_socket_events():
             user = verify_token(token)
             if user:
                 await sio.save_session(sid, {"user": user})
-                print(f"🔒 Authenticated socket {sid} for user {user.get('email')}")
+                print(f"[Socket] Authenticated socket {sid} for user {user.get('email')}")
             else:
-                print(f"⚠️ Invalid token provided on socket connect for {sid}")
+                print(f"[Socket Warning] Invalid token provided on socket connect for {sid}")
 
     @sio.event
     async def disconnect(sid):
-        print("❌ Socket Disconnected:", sid)
+        print("[Socket] Disconnected:", sid)
         for team_id, socket_id in list(team_sockets.items()):
             if socket_id == sid:
                 del team_sockets[team_id]
-                print(f"Removed team {team_id} socket mapping")
+                print(f"[Socket] Removed team {team_id} socket mapping")
 
     @sio.event
     async def join_auction(sid, data=None):
         print("JOIN AUCTION EVENT TRIGGERED")
-        print(f"📡 Client joined auction: {sid}")
+        print(f"[Socket] Client joined auction: {sid}")
 
         team_id = None
 
@@ -130,7 +130,7 @@ def register_socket_events():
             }, to=sid)
             
         except Exception as e:
-            print("❌ join_auction error: ", e)
+            print("[Socket Error] join_auction error: ", e)
         finally:
             cursor.close()
             conn.close()
@@ -164,7 +164,7 @@ def register_socket_events():
             else:
                 # If no authentication is provided, print warning
                 team_id = data.get("team_id")
-                print(f"⚠️ Unauthenticated bid placed by socket {sid} claiming team {team_id}")
+                print(f"[Socket Warning] Unauthenticated bid placed by socket {sid} claiming team {team_id}")
             
             player_id = data.get("player_id")
             bid_value = data.get("bid_amount")
@@ -377,7 +377,7 @@ def register_socket_events():
 
                 conn.commit()
 
-                print(f"💰 Bid accepted: Team {team_id} ➜ ₹{bid_amount}")
+                print(f"[Socket] Bid accepted: Team {team_id} -> {bid_amount}")
 
                 # ---------------- ACK TO BIDDER ----------------
                 await sio.emit(
@@ -461,7 +461,7 @@ def register_socket_events():
                     """, (active_player,))
                     conn.commit()
 
-                    print("⏱ Auction timer extended by 30 seconds")
+                    print("[Socket] Auction timer extended by 30 seconds")
                     await sio.emit("timer_update", {
                         "remaining_seconds": 30,
                         "extended": True
@@ -478,7 +478,7 @@ def register_socket_events():
 
                 conn.rollback()
 
-                print("⚠ place_bid error:", e)
+                print("[Socket Error] place_bid error:", e)
 
                 await sio.emit(
                     "bid_rejected",

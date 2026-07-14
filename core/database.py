@@ -51,7 +51,7 @@ class PostgresConnectionWrapper:
 
 def get_db_connection():
     try:
-        print("🔌 Attempting DB Connection...")
+        print("[DB] Attempting DB Connection...")
         import psycopg2
 
         # Support Supabase / standard PostgreSQL env variables, or fallback to local defaults
@@ -69,9 +69,9 @@ def get_db_connection():
             database=database,
             connect_timeout=5
         )
-        print("DB Connection established")
+        print("[DB] Connection established")
         return PostgresConnectionWrapper(conn)
     
     except Exception as e:
-        print("❌Database Connection Error:", e)
+        print("[DB Error] Database Connection Error:", e)
         return None
