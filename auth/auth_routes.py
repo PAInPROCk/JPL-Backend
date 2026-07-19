@@ -6,25 +6,7 @@ from auth.auth_handler import create_access_token, verify_token, get_token_from_
 
 router = APIRouter()
 
-def get_supabase_client():
-    from supabase import create_client
-    import os
-
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY")
-
-    if not supabase_url:
-        raise RuntimeError("SUPABASE_URL is missing from backend .env")
-
-    if not supabase_key:
-        raise RuntimeError("SUPABASE_ANON_KEY or SUPABASE_KEY is missing from backend .env")
-
-    if supabase_key.startswith("sb_"):
-        raise RuntimeError(
-            "SUPABASE_KEY appears to be a publishable key. Use the Supabase anon public JWT key instead."
-        )
-
-    return create_client(supabase_url, supabase_key)
+from core.supabase_client import get_supabase_client
 
 #------------LOGIN------------
 @router.post("/login")
@@ -104,14 +86,14 @@ def logout(response: Response):
 def check_auth(request: Request):
     token = get_token_from_request(request)
     if not token:
-        return {"Aunthenticated": False}
+        return {"authenticated": False}
     
     payload = verify_token(token)
 
     if not payload:
-        return {"Aunthenticated": False}
+        return {"authenticated": False}
     
-    return{
+    return {
         "authenticated": True,
-        "user":payload
+        "user": payload
     }

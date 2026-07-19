@@ -25,6 +25,20 @@ def verify_token(token: str):
     if not token:
         return None
         
+    # 1. Attempt fast local verification (No WAN network call: ~0.25 ms)
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_aud": False})
+        return {
+            "id": payload.get("sub"),
+            "email": payload.get("email"),
+            "role": payload.get("app_metadata", {}).get("role", "team"),
+            "team_id": payload.get("user_metadata", {}).get("team_id"),
+            "name": payload.get("user_metadata", {}).get("name", "")
+        }
+    except Exception as local_err:
+        print("[Auth] Local JWT verification failed, trying Supabase API:", local_err)
+
+    # 2. Fallback to Supabase Auth API verification if local check fails
     try:
         from supabase import create_client
         import os
@@ -33,12 +47,9 @@ def verify_token(token: str):
         supabase_key = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY")
         
         if supabase_key and supabase_key.startswith("sb_"):
-            # Use the full JWT anon key if the publishable key starts with sb_
             supabase_key = os.getenv("SUPABASE_ANON_KEY")
             
         supabase = create_client(supabase_url, supabase_key)
-        
-        # Verify the token via Supabase Auth API
         res = supabase.auth.get_user(token)
         user = res.user
         
@@ -53,8 +64,8 @@ def verify_token(token: str):
             "name": user.user_metadata.get("name", "") if user.user_metadata else ""
         }
     
-    except Exception as e:
-        print("❌ Token verification failed via Supabase API:", e)
+    except Exception as api_err:
+        print("[Auth Error] Token verification failed via Supabase API:", api_err)
         return None
     
 def get_token_from_request(request):
