@@ -27,7 +27,11 @@ def verify_token(token: str):
         
     # 1. Attempt fast local verification (No WAN network call: ~0.25 ms)
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_aud": False})
+        header = jwt.get_unverified_header(token)
+        token_alg = header.get("alg", "HS256")
+        allowed_algs = list(set([token_alg, "HS256", "RS256", "ES256", "HS384", "HS512"]))
+        
+        payload = jwt.decode(token, SECRET_KEY, algorithms=allowed_algs, options={"verify_aud": False})
         return {
             "id": payload.get("sub"),
             "email": payload.get("email"),
@@ -35,21 +39,16 @@ def verify_token(token: str):
             "team_id": payload.get("user_metadata", {}).get("team_id"),
             "name": payload.get("user_metadata", {}).get("name", "")
         }
+    except jwt.ExpiredSignatureError:
+        print("[Auth Info] Session token has expired. User needs to log in again.")
+        return None
     except Exception as local_err:
-        print("[Auth] Local JWT verification failed, trying Supabase API:", local_err)
+        print("[Auth] Local JWT verification skipped, trying Supabase API:", local_err)
 
     # 2. Fallback to Supabase Auth API verification if local check fails
     try:
-        from supabase import create_client
-        import os
-        
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY")
-        
-        if supabase_key and supabase_key.startswith("sb_"):
-            supabase_key = os.getenv("SUPABASE_ANON_KEY")
-            
-        supabase = create_client(supabase_url, supabase_key)
+        from core.supabase_client import get_supabase_client
+        supabase = get_supabase_client()
         res = supabase.auth.get_user(token)
         user = res.user
         
@@ -65,7 +64,11 @@ def verify_token(token: str):
         }
     
     except Exception as api_err:
-        print("[Auth Error] Token verification failed via Supabase API:", api_err)
+        err_str = str(api_err)
+        if "expired" in err_str.lower():
+            print("[Auth Info] Session token has expired via Supabase API check.")
+        else:
+            print("[Auth Error] Token verification failed via Supabase API:", api_err)
         return None
     
 def get_token_from_request(request):
