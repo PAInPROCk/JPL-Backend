@@ -9,50 +9,39 @@ async def background_timer(player_id, mode, session_id):
 
     print(f"⏰ Timer started for player {player_id}")
 
-    while True:
+    # Fetch initial auction state ONCE when timer starts
+    conn = get_db_connection()
+    if not conn:
+        print("⚠ DB connection failed in background_timer")
+        return
 
-        conn = get_db_connection()
+    try:
         cursor = conn.cursor(pymysql.cursors.DictCursor)
-
-        try:
-            cursor.execute(
-                "SELECT paused, paused_remaining, expires_at FROM current_auction WHERE player_id=%s",
-                (player_id,)
-            )
-
-            state = cursor.fetchone()
-            if not state:
-                print("⚠ Auction row missing - stopping timer")
-                return
-            
-            print("PAUSE STATE:", state["paused"])
-
-        finally:
+        cursor.execute(
+            "SELECT paused, paused_remaining, expires_at FROM current_auction WHERE player_id=%s",
+            (player_id,)
+        )
+        state = cursor.fetchone()
+    finally:
+        if cursor:
             cursor.close()
+        if conn:
             conn.close()
 
-        if not state:
-            print("⚠ Auction row missing — stopping timer")
-            return
+    if not state or not state.get("expires_at"):
+        print("⚠ Auction row missing — stopping timer")
+        return
 
-        # ---------------- PAUSED ----------------
-        if state["paused"]:
-            await asyncio.sleep(1)
-            continue
+    db_expires = state["expires_at"]
+    if isinstance(db_expires, str):
+        db_expires = datetime.fromisoformat(db_expires)
 
-        # ---------------- NORMAL TIMER ----------------
+    if db_expires.tzinfo is None:
+        db_expires = db_expires.replace(tzinfo=timezone.utc)
+
+    while True:
+        loop_start = datetime.now(timezone.utc)
         now = datetime.now(timezone.utc)
-
-        db_expires = state["expires_at"]
-        if not db_expires:
-            print("⚠ expires_at missing")
-            return
-
-        if isinstance(db_expires, str):
-            db_expires = datetime.fromisoformat(db_expires)
-
-        if db_expires.tzinfo is None:
-            db_expires = db_expires.replace(tzinfo=timezone.utc)
 
         remaining = max(0, int((db_expires - now).total_seconds()))
 
@@ -64,11 +53,17 @@ async def background_timer(player_id, mode, session_id):
             "server_time": now.isoformat()
         })
 
-        await asyncio.sleep(1)
+        # Calculate exact elapsed processing time to compensate for drift (1.0s target loop time)
+        elapsed = (datetime.now(timezone.utc) - loop_start).total_seconds()
+        sleep_duration = max(0.1, 1.0 - elapsed)
+        await asyncio.sleep(sleep_duration)
 
     print("⏰ Timer expired")
 
     conn = get_db_connection()
+    if not conn:
+        print("⚠ DB connection failed after timer expiration")
+        return
     cursor = conn.cursor(pymysql.cursors.DictCursor)
 
     try:
@@ -108,7 +103,7 @@ async def background_timer(player_id, mode, session_id):
                 (top_bid["team_id"],)
             )
             row = cursor.fetchone()
-            updated_purse = float(row["purse"])
+            updated_purse = float(row["purse"]) if row and row.get("purse") else 0.0
             winner_sid = team_sockets.get(top_bid["team_id"])
 
             if winner_sid:
@@ -194,17 +189,23 @@ async def background_timer(player_id, mode, session_id):
         cursor.execute("DELETE FROM current_auction WHERE player_id=%s", (player_id,))
         cursor.execute("DELETE FROM live_bids WHERE player_id=%s", (player_id,))
 
-        conn.commit()
+        if conn:
+            conn.commit()
 
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
     # ---------------- DELAY BEFORE NEXT PLAYER ----------------
     print("⏳ Waiting 10 seconds before next player")
     await asyncio.sleep(10)
 
     conn = get_db_connection()
+    if not conn:
+        print("⚠ DB connection failed before next player selection")
+        return
     cursor = conn.cursor(pymysql.cursors.DictCursor)
 
     try:
@@ -243,7 +244,8 @@ async def background_timer(player_id, mode, session_id):
             mode
         ))
 
-        conn.commit()
+        if conn:
+            conn.commit()
 
         await sio.emit("auction_started", {
             "player": {
@@ -273,8 +275,10 @@ async def background_timer(player_id, mode, session_id):
         print(f"🚀 Next auction started for {next_player['name']}")
 
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 
 # async def load_next_player_after_delay():
