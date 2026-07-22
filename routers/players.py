@@ -432,7 +432,7 @@ async def upload_players(request: Request, file: UploadFile = File(...)):
             if not row.get("name"):
                 continue
 
-            image_name = row.get("image_name")
+            image_name = row.get("image_name") or row.get("image_path") or row.get("image")
             image_path = None
             
             if image_name and os.path.exists(images_folder):
@@ -460,6 +460,7 @@ async def upload_players(request: Request, file: UploadFile = File(...)):
                     times_out, teams_played, image_path
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (name) DO NOTHING
             """, (
                 row.get("name"),
                 row.get("nickname"),
@@ -468,8 +469,8 @@ async def upload_players(request: Request, file: UploadFile = File(...)):
                 row.get("category"),
                 row.get("jersey"),
                 row.get("type"),
-                row.get("mobile_No"),
-                row.get("email_Id"),
+                row.get("mobile_no") or row.get("mobile_No") or row.get("mobile"),
+                row.get("email_id") or row.get("email_Id") or row.get("email"),
                 row.get("base_price"),
                 row.get("total_runs"),
                 row.get("highest_runs"),
