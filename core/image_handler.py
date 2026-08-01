@@ -1,9 +1,22 @@
 import io
 import os
 from PIL import Image
+from fastapi import HTTPException
 from core.supabase_client import get_supabase_admin_client
 
 BUCKET_NAME = os.getenv("SUPABASE_STORAGE_BUCKET", "auctra-uploads")
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB limit
+
+def validate_image_bytes(image_bytes: bytes, max_size: int = MAX_FILE_SIZE):
+    """Validates that the file size is within limits and that Pillow can open the image."""
+    if len(image_bytes) > max_size:
+        raise HTTPException(status_code=400, detail="File size exceeds the 5MB limit")
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img.load()
+    except Exception as e:
+        print("❌ Image validation error:", e)
+        raise HTTPException(status_code=400, detail="Invalid or corrupted image file format")
 
 def crop_and_resize_to_square(image: Image.Image, target_size: int) -> Image.Image:
     """Center crops an image to 1:1 aspect ratio and resizes it to target_size."""
@@ -59,3 +72,11 @@ def upload_image_to_supabase(image_bytes: bytes, path: str) -> str:
     # Get the public URL of the uploaded image
     res = supabase.storage.from_(BUCKET_NAME).get_public_url(path)
     return res
+
+def delete_image_from_supabase(path: str):
+    """Deletes an image file from the Supabase Storage bucket."""
+    try:
+        supabase = get_supabase_admin_client()
+        supabase.storage.from_(BUCKET_NAME).remove([path])
+    except Exception as e:
+        print(f"⚠️ Failed to delete image from Supabase storage: {e}")

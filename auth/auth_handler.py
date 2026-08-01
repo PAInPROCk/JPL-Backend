@@ -32,10 +32,16 @@ def verify_token(token: str):
         allowed_algs = list(set([token_alg, "HS256", "RS256", "ES256", "HS384", "HS512"]))
         
         payload = jwt.decode(token, SECRET_KEY, algorithms=allowed_algs, options={"verify_aud": False})
+        role = (
+            payload.get("app_metadata", {}).get("role") or 
+            payload.get("user_metadata", {}).get("role") or 
+            payload.get("role") or 
+            "team"
+        )
         return {
             "id": payload.get("sub"),
             "email": payload.get("email"),
-            "role": payload.get("app_metadata", {}).get("role", "team"),
+            "role": role,
             "team_id": payload.get("user_metadata", {}).get("team_id"),
             "name": payload.get("user_metadata", {}).get("name", "")
         }
@@ -55,10 +61,14 @@ def verify_token(token: str):
         if not user:
             return None
             
+        app_meta_role = user.app_metadata.get("role") if user.app_metadata else None
+        user_meta_role = user.user_metadata.get("role") if user.user_metadata else None
+        role = app_meta_role or user_meta_role or "team"
+        
         return {
             "id": user.id,
             "email": user.email,
-            "role": user.app_metadata.get("role", "team") if user.app_metadata else "team",
+            "role": role,
             "team_id": user.user_metadata.get("team_id") if user.user_metadata else None,
             "name": user.user_metadata.get("name", "") if user.user_metadata else ""
         }

@@ -22,8 +22,8 @@ except ImportError:
 
 supabase: Client = create_client(supabase_url, supabase_service_key)
 
-def create_admin(email, password, name):
-    print(f"🚀 Creating Supabase Admin User: {email}...")
+def create_admin(email, password, name, role):
+    print(f"🚀 Creating Supabase Admin or Team User: {email}...")
     try:
         # Create user via Supabase Auth Admin API
         user = supabase.auth.admin.create_user({
@@ -32,10 +32,10 @@ def create_admin(email, password, name):
             "email_confirm": True, # Auto-confirm email
             "user_metadata": {
                 "name": name,
-                "role": "admin"
+                "role": role
             },
             "app_metadata": {
-                "role": "admin"
+                "role": role
             }
         })
         
@@ -47,11 +47,13 @@ def create_admin(email, password, name):
         print(f"❌ Error creating admin user: {e}")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 4:
-        print("Usage: python create_supabase_admin.py <email> <password> <name>")
-        print("Example: python create_supabase_admin.py admin@example.com mysecretpassword 'JPL Admin'")
+    if len(sys.argv) < 5:
+        print("Usage: python create_supabase_admin.py <email> <password> <name> <role>")
+        print("Example (Admin): python create_supabase_admin.py admin@example.com mysecretpassword 'JPL Admin' admin")
+        print("Example (Team): python create_supabase_admin.py team@example.com mysecretpassword 'Mumbai Indians' team")
     else:
         email = sys.argv[1]
         password = sys.argv[2]
         name = sys.argv[3]
-        create_admin(email, password, name)
+        role = sys.argv[4]
+        create_admin(email, password, name, role)

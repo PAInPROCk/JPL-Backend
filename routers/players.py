@@ -188,16 +188,24 @@ async def upload_player_image(
 ):
 
     token = get_token_from_request(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication token required")
 
     payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    if not payload or payload.get("role") != "admin":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin privileges required")
 
     if not image.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
     img_content = await image.read()
+    
+    # Validate file size (max 5MB) and format
+    from core.image_handler import validate_image_bytes
+    validate_image_bytes(img_content)
     
     try:
         from PIL import Image
@@ -214,6 +222,8 @@ async def upload_player_image(
         return {
             "image_path": public_url
         }
+    except HTTPException:
+        raise
     except Exception as e:
         print("❌ Error processing/uploading player image:", e)
         raise HTTPException(status_code=500, detail=f"Image upload failed: {str(e)}")
@@ -272,11 +282,14 @@ async def add_player(
     image_path = None
 
     if image:
+        img_content = await image.read()
+        from core.image_handler import validate_image_bytes
+        validate_image_bytes(img_content)
+
         try:
             from PIL import Image
             from core.image_handler import crop_and_resize_to_square, compress_to_webp, upload_image_to_supabase
             
-            img_content = await image.read()
             pil_image = Image.open(io.BytesIO(img_content))
             processed_image = crop_and_resize_to_square(pil_image, 500)
             webp_bytes = compress_to_webp(processed_image)
@@ -284,6 +297,8 @@ async def add_player(
             filename = f"{uuid.uuid4().hex}.webp"
             storage_path = f"players/{filename}"
             image_path = upload_image_to_supabase(webp_bytes, storage_path)
+        except HTTPException:
+            raise
         except Exception as e:
             print("❌ Error processing/uploading player image in add_player:", e)
             raise HTTPException(status_code=500, detail=f"Image upload failed: {str(e)}")

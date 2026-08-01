@@ -139,11 +139,14 @@ async def add_team(
     image_path = None
 
     if image:
+        img_content = await image.read()
+        from core.image_handler import validate_image_bytes
+        validate_image_bytes(img_content)
+        
         try:
             from PIL import Image
             from core.image_handler import crop_and_resize_to_square, compress_to_webp, upload_image_to_supabase
             
-            img_content = await image.read()
             pil_image = Image.open(io.BytesIO(img_content))
             processed_image = crop_and_resize_to_square(pil_image, 400)
             webp_bytes = compress_to_webp(processed_image)
@@ -151,6 +154,8 @@ async def add_team(
             filename = f"{uuid.uuid4().hex}.webp"
             storage_path = f"teams/{filename}"
             image_path = upload_image_to_supabase(webp_bytes, storage_path)
+        except HTTPException:
+            raise
         except Exception as e:
             print("❌ Error processing/uploading team logo in add_team:", e)
             raise HTTPException(status_code=500, detail=f"Image upload failed: {str(e)}")
