@@ -34,6 +34,14 @@ def register_socket_events():
                 print(f"[Socket] Authenticated socket {sid} for user {user.get('email')}")
             else:
                 print(f"[Socket Warning] Invalid token provided on socket connect for {sid}")
+                raise ConnectionRefusedError("Authentication token missing")                                                
+
+            user = verify_token(token_list[0])                                                                              
+            if not user:                                                                                                    
+                raise ConnectionRefusedError("Invalid authentication token")                                                
+                                                                                                                        
+            await sio.save_session(sid, {"user": user})
+
 
     @sio.event
     async def disconnect(sid):
@@ -152,30 +160,48 @@ def register_socket_events():
                     await sio.save_session(sid, {"user": user})
             
             # If user is authenticated, override team_id with the token's team_id
-            if user:
-                if user.get("role") == "team":
-                    team_id = user.get("team_id")
-                    if not team_id:
-                        await sio.emit("bid_rejected", {"error": "User is not assigned to any team"}, to=sid)
-                        return
-                else:
-                    # Admins or other roles get team_id from data directly (for testing/mocking)
-                    team_id = data.get("team_id")
-            else:
-                # If no authentication is provided, print warning
-                team_id = data.get("team_id")
-                print(f"[Socket Warning] Unauthenticated bid placed by socket {sid} claiming team {team_id}")
+            # if user:                                                              #Comment out due to old legacy check for user and allowing unauthenticated bids
+            #     if user.get("role") == "team":
+            #         team_id = user.get("team_id")
+            #         if not team_id:
+            #             await sio.emit("bid_rejected", {"error": "User is not assigned to any team"}, to=sid)
+            #             return
+            #     else:
+            #         # Admins or other roles get team_id from data directly (for testing/mocking)
+            #         team_id = data.get("team_id")
+            # else:
+            #     # If no authentication is provided, print warning
+            #     team_id = data.get("team_id")
+            #     print(f"[Socket Warning] Unauthenticated bid placed by socket {sid} claiming team {team_id}")
             
             player_id = data.get("player_id")
             bid_value = data.get("bid_amount")
 
-            if bid_value is None:
-                await sio.emit(
+            if not user:                                                                                                        
+                   # Reject unauthenticated bids immediately                                                                       
+                   await sio.emit(                                                                                                 
+                       "bid_rejected",                                                                                             
+                       {"error": "Authentication required to place a bid"},                                                        
+                       to=sid                                                                                                      
+                   )                                                                                                               
+                   return                                                                                                          
+
+            if user.get("role") == "team":                                                                                      
+                team_id = user.get("team_id")                                                                                   
+                if not team_id:                                                                                                 
+                       await sio.emit("bid_rejected", {"error": "User is not assigned to any team"}, to=sid)                       
+                       return                                                                                                      
+                else:                                                                                                               
+                   # Admins can pass team_id directly for manual/testing bids                                                      
+                   team_id = data.get("team_id")        
+
+                if bid_value is None:
+                    await sio.emit(
                     "bid_rejected",
                     {"error": "Bid amount is required"},
                     to=sid
                 )
-                return
+                    return
             
             bid_amount = float(bid_value)
 
