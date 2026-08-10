@@ -70,22 +70,47 @@ class PostgresConnectionWrapper:
         return self._conn.cursor(cursor_factory=RealDictCursor)
 
     def commit(self):
-        return self._conn.commit()
+        if self._conn is not None:
+            return self._conn.commit()
 
     def rollback(self):
-        return self._conn.rollback()
+        if self._conn is not None:
+            return self._conn.rollback()
 
     def close(self):
         # Instead of closing the actual database TCP connection,
         # return it back to the global ThreadedConnectionPool!
-        if _db_pool is not None and self._conn is not None:
+        if self._conn is not None:
             try:
-                _db_pool.putconn(self._conn)
-            except Exception as e:
-                print("[DB Error] Failed to release connection back to pool:", e)
-        else:
-            if self._conn is not None:
-                self._conn.close()
+                # DB-01 Fix: Always rollback uncommitted or aborted transaction state
+                # before releasing the connection back to the pool to prevent state leaks.
+                self._conn.rollback()
+            except Exception as rollback_err:
+                print("[DB Warning] Rollback prior to pool release failed:", rollback_err)
+
+            if _db_pool is not None:
+                try:
+                    _db_pool.putconn(self._conn)
+                except Exception as e:
+                    print("[DB Error] Failed to release connection back to pool:", e)
+                    try:
+                        self._conn.close()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+            self._conn = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            self.rollback()
+        self.close()
 
     def begin(self):
         pass

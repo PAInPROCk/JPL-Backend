@@ -37,7 +37,7 @@ CREATE TABLE players (
     gender VARCHAR(20),
     category VARCHAR(100),
     type VARCHAR(100),
-    jersey INT,
+    jersey INT UNIQUE,
     mobile_No VARCHAR(20),
     email_Id VARCHAR(255),
     base_price DECIMAL(15,2) DEFAULT 0.00,
@@ -117,6 +117,16 @@ CREATE TABLE unsold_players (
     reason TEXT,
     added_on TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ==========================================
+-- INDEXES FOR FOREIGN KEYS (DB-02 Optimization)
+-- ==========================================
+CREATE INDEX IF NOT EXISTS idx_bids_player_id ON bids(player_id);
+CREATE INDEX IF NOT EXISTS idx_bids_team_id ON bids(team_id);
+CREATE INDEX IF NOT EXISTS idx_sold_players_team_id ON sold_players(team_id);
+CREATE INDEX IF NOT EXISTS idx_player_teams_team_id ON player_teams(team_id);
+CREATE INDEX IF NOT EXISTS idx_live_bids_team_id ON live_bids(team_id);
+CREATE INDEX IF NOT EXISTS idx_users_team_id ON users(team_id);
 
 -- ==========================================
 -- SUPABASE AUTH USER SYNCHRONIZATION TRIGGER
