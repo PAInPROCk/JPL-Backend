@@ -20,27 +20,49 @@ def register_socket_events():
     async def connect(sid, eviron):
         print("[Socket] Connected:", sid)
         from urllib.parse import parse_qs
+        from http.cookies import SimpleCookie
         from auth.auth_handler import verify_token
+
+        token= None
         
         query_string = eviron.get("QUERY_STRING", "")
         params = parse_qs(query_string)
-        token_list = params.get("token")
-        
-        if token_list:
-            token = token_list[0]
+        if params.get("token"):
+            token = params.get("token")[0]
+
+        if not token:
+            cookie_str = eviron.get("HTTP_COOKIE", "")
+            if cookie_str:
+                cookie = SimpleCookie()
+                cookie.load(cookie_str)
+                if "access_token" in cookie:
+                    token = cookie["access_token"].value
+
+        if token:
             user = verify_token(token)
             if user:
                 await sio.save_session(sid, {"user": user})
-                print(f"[Socket] Authenticated socket {sid} for user {user.get('email')}")
+                print(f"[Socket] Authenticated socket {sid} for user {user.get('email')} (Team {user.               
+  get('team_id')})")
             else:
                 print(f"[Socket Warning] Invalid token provided on socket connect for {sid}")
-                raise ConnectionRefusedError("Authentication token missing")                                                
+        token_list = params.get("token")
+        
+        # if token_list:
+        #     token = token_list[0]
+        #     user = verify_token(token)
+        #     if user:
+        #         await sio.save_session(sid, {"user": user})
+        #         print(f"[Socket] Authenticated socket {sid} for user {user.get('email')}")
+        #     else:
+        #         print(f"[Socket Warning] Invalid token provided on socket connect for {sid}")
+        #         raise ConnectionRefusedError("Authentication token missing")                                                
 
-            user = verify_token(token_list[0])                                                                              
-            if not user:                                                                                                    
-                raise ConnectionRefusedError("Invalid authentication token")                                                
+        #     user = verify_token(token_list[0])                                                                              
+        #     if not user:                                                                                                    
+        #         raise ConnectionRefusedError("Invalid authentication token")                                                
                                                                                                                         
-            await sio.save_session(sid, {"user": user})
+        #     await sio.save_session(sid, {"user": user})
 
 
     @sio.event
@@ -487,10 +509,16 @@ def register_socket_events():
                     """, (active_player,))
                     conn.commit()
 
-                    print("[Socket] Auction timer extended by 30 seconds")
-                    await sio.emit("timer_update", {
-                        "remaining_seconds": 30,
-                        "extended": True
+                    
+                    # Update in-memory timer expiry so background_timer picks it up instantly                                        
+                    from auction.auction_engine import auction_expiry                                                                
+                    if active_player in auction_expiry:                                                                              
+                        auction_expiry[active_player] += timedelta(seconds=30)                                                       
+
+                    print("[Socket] Auction timer extended by 30 seconds")                                                           
+                    await sio.emit("timer_update", {                                                                                 
+                        "remaining_seconds": int((auction_expiry[active_player] - datetime.now(timezone.utc)).total_seconds()),      
+                        "extended": True                                                                                             
                     })
                 # ---------- BROADCAST UPDATE ----------
                 await sio.emit("auction_update", {

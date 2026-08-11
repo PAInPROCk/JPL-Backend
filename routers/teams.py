@@ -116,6 +116,7 @@ async def add_team(
     playersBought: Optional[int] = Form(None),
     mobile: Optional[str] = Form(None),
     emailId: Optional[str] = Form(None),
+    password: Optional[str] = Form(None), # 👈 1. ADDED: Password field for team user 
 
     # -------- FILE --------
     image: Optional[UploadFile] = File(None)
@@ -178,6 +179,7 @@ async def add_team(
             INSERT INTO teams 
             (name, captain, mobile_no, email_id, team_rank, total_budget, season_budget, purse, players_bought, image_path)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING team_id
         """, (
             teamName,
             captain,
@@ -190,8 +192,34 @@ async def add_team(
             playersBought,
             image_path
         ))
-
+        new_team_row = cursor.fetchone()
+        new_team_id = new_team_row["team_id"] if new_team_row else None
         conn.commit()
+
+        # 3. Added: Automated Supabase auth user creation
+        if emailId and new_team_id:
+            try:
+                from core.supabase_client import get_supabase_admin_client
+                supabase_admin = get_supabase_admin_client()
+
+                # Use provided password or fallback to default initial password                                     
+                team_password = password if password else "JPLTeam@2026"                                                                                                                                                 
+                supabase_admin.auth.admin.create_user({                                                             
+                        "email": emailId,                                                                               
+                        "password": team_password,                                                                      
+                        "email_confirm": True, # Auto-confirm email                                                     
+                        "user_metadata": {                                                                              
+                            "name": teamName,                                                                           
+                            "role": "team",                                                                             
+                            "team_id": new_team_id                                                                      
+                        },                                                                                              
+                        "app_metadata": {                                                                               
+                            "role": "team"                                                                              
+                        }                                                                                               
+                    })                                                                                                  
+                print(f"✅ Created Supabase Auth User for '{teamName}' (Email: {emailId}, Team ID: {new_team_id})") 
+            except Exception as auth_err:                                                                           
+                print("⚠ Warning: Team created in DB, but failed to create Supabase Auth User:", auth_err)          
 
         return {
             "message": "Team added successfully!"

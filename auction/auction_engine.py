@@ -5,6 +5,8 @@ import pymysql
 from core.database import get_db_connection
 from sockets.socket_manager import sio, team_sockets
 
+auction_expiry = {}
+
 async def background_timer(player_id, mode, session_id):
 
     print(f"⏰ Timer started for player {player_id}")
@@ -39,11 +41,16 @@ async def background_timer(player_id, mode, session_id):
     if db_expires.tzinfo is None:
         db_expires = db_expires.replace(tzinfo=timezone.utc)
 
+    # Store initial expiry time in shared memory                                                                                     
+    auction_expiry[player_id] = db_expires 
+
     while True:
         loop_start = datetime.now(timezone.utc)
         now = datetime.now(timezone.utc)
 
-        remaining = max(0, int((db_expires - now).total_seconds()))
+        # Dynamically read expiry from shared memory (reflects extension instantly)                                              
+        current_expires = auction_expiry.get(player_id, db_expires)                                                              
+        remaining = max(0, int((current_expires - now).total_seconds()))                                                         
 
         if remaining <= 0:
             break
@@ -57,8 +64,9 @@ async def background_timer(player_id, mode, session_id):
         elapsed = (datetime.now(timezone.utc) - loop_start).total_seconds()
         sleep_duration = max(0.1, 1.0 - elapsed)
         await asyncio.sleep(sleep_duration)
-
+        
     print("⏰ Timer expired")
+    auction_expiry.pop(player_id, None)
 
     conn = get_db_connection()
     if not conn:
@@ -279,6 +287,7 @@ async def background_timer(player_id, mode, session_id):
             cursor.close()
         if conn:
             conn.close()
+            auction_expiry.pop(player_id, None)              # Clean up shared memory when loop exits                                                                                     
 
 
 # async def load_next_player_after_delay():
