@@ -6,8 +6,20 @@ from core.database import get_db_connection
 from sockets.socket_manager import sio, team_sockets
 
 auction_expiry = {}
+active_timer_tasks = {}
+
+def stop_timer_task(player_id):
+    """Cancels and cleans up active background_timer asyncio Task for player_id."""
+    task = active_timer_tasks.pop(player_id, None)
+    auction_expiry.pop(player_id, None)
+    if task and not task.done():
+        task.cancel()
+        print(f"🛑 Cancelled background timer task for player {player_id}")
 
 async def background_timer(player_id, mode, session_id):
+
+    # Track active task for cancellation on pause/cancel
+    active_timer_tasks[player_id] = asyncio.current_task()
 
     print(f"⏰ Timer started for player {player_id}")
 
@@ -41,7 +53,7 @@ async def background_timer(player_id, mode, session_id):
     if db_expires.tzinfo is None:
         db_expires = db_expires.replace(tzinfo=timezone.utc)
 
-    # Store initial expiry time in shared memory                                                                                     
+    # Store initial expiry time in shared memory
     auction_expiry[player_id] = db_expires 
 
     while True:
@@ -49,7 +61,7 @@ async def background_timer(player_id, mode, session_id):
         now = datetime.now(timezone.utc)
 
         # Dynamically read expiry from shared memory (reflects extension instantly)                                              
-        current_expires = auction_expiry.get(player_id, db_expires)                                                              
+        current_expires = auction_expiry.get(player_id, db_expires)
         remaining = max(0, int((current_expires - now).total_seconds()))                                                         
 
         if remaining <= 0:
@@ -287,7 +299,8 @@ async def background_timer(player_id, mode, session_id):
             cursor.close()
         if conn:
             conn.close()
-            auction_expiry.pop(player_id, None)              # Clean up shared memory when loop exits                                                                                     
+        active_timer_tasks.pop(player_id, None)
+        auction_expiry.pop(player_id, None)                                                                                     
 
 
 # async def load_next_player_after_delay():

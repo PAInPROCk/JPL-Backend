@@ -401,6 +401,10 @@ async def pause_auction(request: Request):
 
         print(f"⏸ Auction paused for player {player_id} with {remaining}s remaining")
 
+        # ---------- CANCEL BACKGROUND TIMER ----------
+        from auction.auction_engine import stop_timer_task
+        stop_timer_task(player_id)
+
         # ---------- SOCKET EVENT ----------
         await sio.emit("auction_paused", {
             "paused": True,
@@ -481,15 +485,15 @@ async def resume_auction(request: Request):
 
         print(f"▶ Auction resumed for player {player_id} - {remaining}s remaining")
 
-        # # --------------- START TIMER AGAIN -----------------
-        # asyncio.create_task(
-        #     background_timer(
-        #         player_id,
-        #         new_end_time,
-        #         mode,
-        #         payload.get("session_id")
-        #     )
-        # )
+        # --------------- START TIMER AGAIN -----------------
+        from auction.auction_engine import background_timer
+        asyncio.create_task(
+            background_timer(
+                player_id,
+                mode,
+                payload.get("session_id")
+            )
+        )
 
         # ---------------- NOTIFY CLIENTS ----------------
         await sio.emit("auction_resumed",{
@@ -627,6 +631,9 @@ async def cancel_auction(request: Request):
         ))
 
         # ------------- CLEANUP ----------------
+        from auction.auction_engine import stop_timer_task
+        stop_timer_task(player_id)
+
         cursor.execute("DELETE FROM current_auction WHERE player_id = %s", (player_id,))
 
         cursor.execute("DELETE FROM live_bids WHERE player_id = %s", (player_id,))
