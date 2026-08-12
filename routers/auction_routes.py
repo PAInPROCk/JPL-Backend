@@ -1126,3 +1126,137 @@ async def mark_unsold(request: Request):
         conn.close()
 
 
+@router.post("/undo-sale")
+async def undo_sale(request: Request):
+    """
+    Reverses the sale of a player (or the last sold player if player_id is not specified):
+    1. Refunds the winning team's purse (purse + sold_price) & updates players_bought count.
+    2. Deletes the sold_players record.
+    3. Cleans current_auction and live_bids rows for that player.
+    4. Notifies connected clients via Socket.IO events.
+    """
+    token = get_token_from_request(request)
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    payload = verify_token(token)
+
+    if not payload or payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    player_id = body.get("player_id")
+
+    conn = get_db_connection()
+
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+
+    try:
+        # If player_id provided, fetch that specific sold player; else fetch latest sold player
+        if player_id:
+            cursor.execute("""
+                SELECT player_id, team_id, sold_price
+                FROM sold_players
+                WHERE player_id = %s
+                LIMIT 1
+            """, (player_id,))
+        else:
+            cursor.execute("""
+                SELECT player_id, team_id, sold_price
+                FROM sold_players
+                ORDER BY sold_time DESC
+                LIMIT 1
+            """)
+
+        sold_record = cursor.fetchone()
+
+        if not sold_record:
+            raise HTTPException(status_code=404, detail="No sold player record found to undo")
+
+        target_player_id = sold_record["player_id"]
+        winning_team_id = sold_record["team_id"]
+        sold_price = float(sold_record["sold_price"] or 0)
+
+        # 1. Refund winning team's purse & adjust players_bought count
+        cursor.execute("""
+            UPDATE teams 
+            SET purse = purse + %s,
+                players_bought = GREATEST(0, players_bought - 1)
+            WHERE team_id = %s
+        """, (sold_price, winning_team_id))
+
+        cursor.execute("SELECT purse FROM teams WHERE team_id = %s", (winning_team_id,))
+        team_row = cursor.fetchone()
+        updated_purse = float(team_row["purse"]) if team_row else 0.0
+
+        # 2. Delete sold_players record
+        cursor.execute("DELETE FROM sold_players WHERE player_id = %s", (target_player_id,))
+
+        # 3. Clean current_auction and live_bids
+        cursor.execute("DELETE FROM current_auction WHERE player_id = %s", (target_player_id,))
+        cursor.execute("DELETE FROM live_bids WHERE player_id = %s", (target_player_id,))
+
+        conn.commit()
+
+        # 4. Fetch player info for broadcast
+        cursor.execute("""
+            SELECT id, name, category, type, image_path, base_price
+            FROM players
+            WHERE id = %s
+        """, (target_player_id,))
+
+        player_info = cursor.fetchone()
+
+        if player_info:
+            for k, v in player_info.items():
+                if isinstance(v, Decimal):
+                    player_info[k] = float(v)
+
+        if not player_info:
+            player_info = {"id": target_player_id}
+
+        # 5. Broadcast Socket Events
+        winner_sid = team_sockets.get(winning_team_id)
+        if winner_sid:
+            await sio.emit("purse_update", {"purse": updated_purse}, to=winner_sid)
+
+        await sio.emit("undo_sale", {
+            "player_id": target_player_id,
+            "player": player_info,
+            "team_id": winning_team_id,
+            "refunded_amount": sold_price,
+            "message": f"Sale of {player_info.get('name', 'player')} reversed."
+        })
+
+        print(f"↩ Undo sale completed for player {target_player_id}. Refunded ₹{sold_price} to Team {winning_team_id}.")
+
+        return {
+            "success": True,
+            "message": f"Sale of {player_info.get('name', 'player')} undone successfully",
+            "player_id": target_player_id,
+            "winning_team_id": winning_team_id,
+            "refunded_amount": sold_price
+        }
+
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        print("❌ Error in undo_sale:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
+
