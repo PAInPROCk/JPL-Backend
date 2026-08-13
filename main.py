@@ -22,24 +22,18 @@ app.include_router(auction_router)
 
 
 
-#CORS Setup for frontend and Backend connectivity
-
-# FRONTEND_PORT = 3000
-# # local_ip = get_local_ip()
-
-# origins = [
-#     f"http://localhost:{FRONTEND_PORT}",
-#     f"http://127.0.0.1:{FRONTEND_PORT}",
-#     # f"http://{local_ip}:{FRONTEND_PORT}",
-#     "*"
-# ]
-
-# print("🌐 Allowed CORS Origins:", origins)
-# print(f"🚀 Server running on: http://{local_ip}:5000")
+# CORS Setup for frontend and Backend connectivity
+origins = [
+    "http://localhost:3000",
+    "http://localhost:5000",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5000",
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins= ["*"],
+    allow_origins=origins,
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
