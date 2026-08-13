@@ -13,8 +13,21 @@ from routers.auction_routes import router as auction_router
 import socket
 # from core.utils import get_local_ip
 
-#Create FastAPI app
-app =  FastAPI()
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Pre-warm DB connection pool on server startup to eliminate first-request cold-start latency
+    from core.database import get_pool
+    try:
+        get_pool()
+        print("⚡ Database connection pool pre-warmed on server startup.")
+    except Exception as e:
+        print("⚠ Startup DB pool initialization error:", e)
+    yield
+
+# Create FastAPI app with lifespan context
+app = FastAPI(lifespan=lifespan)
 app.include_router(auth_router)
 app.include_router(players_router)
 app.include_router(teams_router)
