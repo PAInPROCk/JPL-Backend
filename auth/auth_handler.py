@@ -25,31 +25,32 @@ def verify_token(token: str):
     if not token:
         return None
         
-    # 1. Attempt fast local verification (No WAN network call: ~0.25 ms)
+    # 1. Attempt fast local verification if token algorithm is HS256/HS384/HS512
     try:
         header = jwt.get_unverified_header(token)
         token_alg = header.get("alg", "HS256")
-        allowed_algs = list(set([token_alg, "HS256", "RS256", "ES256", "HS384", "HS512"]))
         
-        payload = jwt.decode(token, SECRET_KEY, algorithms=allowed_algs, options={"verify_aud": False})
-        role = (
-            payload.get("app_metadata", {}).get("role") or 
-            payload.get("user_metadata", {}).get("role") or 
-            payload.get("role") or 
-            "team"
-        )
-        return {
-            "id": payload.get("sub"),
-            "email": payload.get("email"),
-            "role": role,
-            "team_id": payload.get("user_metadata", {}).get("team_id"),
-            "name": payload.get("user_metadata", {}).get("name", "")
-        }
+        # Only attempt local decode if algorithm is symmetric HMAC
+        if token_alg.startswith("HS"):
+            payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256", "HS384", "HS512"], options={"verify_aud": False})
+            role = (
+                payload.get("app_metadata", {}).get("role") or 
+                payload.get("user_metadata", {}).get("role") or 
+                payload.get("role") or 
+                "team"
+            )
+            return {
+                "id": payload.get("sub"),
+                "email": payload.get("email"),
+                "role": role,
+                "team_id": payload.get("user_metadata", {}).get("team_id"),
+                "name": payload.get("user_metadata", {}).get("name", "")
+            }
     except jwt.ExpiredSignatureError:
         print("[Auth Info] Session token has expired. User needs to log in again.")
         return None
-    except Exception as local_err:
-        print("[Auth] Local JWT verification skipped, trying Supabase API:", local_err)
+    except Exception:
+        pass  # Fall through to Supabase Auth API verification
 
     # 2. Fallback to Supabase Auth API verification if local check fails
     try:
