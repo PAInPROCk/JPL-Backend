@@ -23,7 +23,7 @@ CREATE TABLE teams (
     Team_Rank INT DEFAULT 0,
     Total_Budget DECIMAL(15,2) DEFAULT 0.00,
     Season_Budget DECIMAL(15,2) DEFAULT 0.00,
-    purse DECIMAL(15,2) DEFAULT 0.00,
+    purse DECIMAL(15,2) DEFAULT 0.00 CHECK (purse >= 0),
     Players_Bought INT DEFAULT 0,
     image_path VARCHAR(255)
 );

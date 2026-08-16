@@ -114,7 +114,8 @@ async def background_timer(player_id, mode, session_id):
 
             cursor.execute("""
             UPDATE teams
-            SET purse = purse - %s
+            SET purse = GREATEST(0.0, purse - %s),
+                Players_Bought = COALESCE(Players_Bought, 0) + 1
             WHERE team_id = %s
             """, (top_bid["bid_amount"], top_bid["team_id"]))
 

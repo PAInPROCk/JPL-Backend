@@ -871,7 +871,7 @@ async def mark_sold(request: Request):
 
         # ---------- DEDUCT TEAM PURSE ----------
         cursor.execute(
-            "UPDATE teams SET purse = purse - %s WHERE team_id = %s",
+            "UPDATE teams SET purse = GREATEST(0.0, purse - %s), Players_Bought = COALESCE(Players_Bought, 0) + 1 WHERE team_id = %s",
             (sold_price, team_id)
         )
         cursor.execute(
