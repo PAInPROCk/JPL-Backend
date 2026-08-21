@@ -12,7 +12,13 @@ import shutil
 
 
 from typing import List, Optional
-
+from PIL import Image
+from core.image_handler import (
+    validate_image_bytes,
+    crop_and_resize_to_square,
+    compress_to_webp,
+    delete_image_from_supabase
+)
 
 router = APIRouter()
 
@@ -512,3 +518,203 @@ async def upload_players(request: Request, file: UploadFile = File(...)):
                 shutil.rmtree(temp_dir)
             except Exception as rmtree_err:
                 print(f"⚠️ Error cleaning up temp dir: {rmtree_err}")
+
+
+#---------- UPDATE PLAYER (PUT /players/{player_id}) ------------
+@router.put("/players/{player_id}")
+async def update_player(
+    player_id: int,
+    request: Request,
+    firstName: Optional[str] = Form(None),
+    middleName: Optional[str] = Form(None),
+    lastName: Optional[str] = Form(None),
+    nickName: Optional[str] = Form(None),
+    age: Optional[int] = Form(None),
+    gender: Optional[str] = Form(None),
+    category: Optional[str] = Form(None),
+    playerType: Optional[str] = Form(None),
+    jerseyNo: Optional[int] = Form(None),
+    mobile: Optional[str] = Form(None),
+    emailId: Optional[str] = Form(None),
+    basePrice: Optional[float] = Form(None),
+    runs: Optional[int] = Form(None),
+    highest_score: Optional[int] = Form(None),
+    wickets: Optional[int] = Form(None),
+    outs: Optional[int] = Form(None),
+    teams: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None)
+):
+    token = get_token_from_request(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication token required")
+    payload = verify_token(token)
+    if not payload or payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+    try:
+        cursor.execute("SELECT * FROM players WHERE id = %s", (player_id,))
+        existing_player = cursor.fetchone()
+        if not existing_player:
+            raise HTTPException(status_code=404, detail="Player not found")
+
+        image_path = existing_player.get("image_path")
+        if image and image.filename:
+            image_bytes = await image.read()
+            validate_image_bytes(image_bytes)
+            pil_img = Image.open(io.BytesIO(image_bytes))
+            cropped_img = crop_and_resize_to_square(pil_img, 400)
+            webp_bytes = compress_to_webp(cropped_img)
+
+            from core.supabase_client import get_supabase_admin_client
+            supabase_admin = get_supabase_admin_client()
+            filename = f"players/{uuid.uuid4().hex}.webp"
+            supabase_admin.storage.from_("auctra-uploads").upload(
+                path=filename,
+                file=webp_bytes,
+                file_options={"content-type": "image/webp", "upsert": "true"}
+            )
+            new_image_path = supabase_admin.storage.from_("auctra-uploads").get_public_url(filename)
+            if image_path:
+                delete_image_from_supabase(image_path)
+            image_path = new_image_path
+
+        # If name parts provided, construct full name, else retain existing
+        if firstName or lastName:
+            name_parts = [p for p in [firstName, middleName, lastName] if p and p.strip()]
+            updated_name = " ".join(name_parts)
+        else:
+            updated_name = existing_player["name"]
+
+        updated_nickname = nickName if nickName is not None else existing_player.get("nickname")
+        updated_age = age if age is not None else existing_player.get("age")
+        updated_gender = gender if gender is not None else existing_player.get("gender")
+        updated_category = category if category is not None else existing_player.get("category")
+        updated_type = playerType if playerType is not None else existing_player.get("type")
+        updated_jersey = jerseyNo if jerseyNo is not None else existing_player.get("jersey")
+        updated_mobile = mobile if mobile is not None else existing_player.get("mobile_no")
+        updated_email = emailId if emailId is not None else existing_player.get("email_id")
+        updated_base_price = basePrice if basePrice is not None else existing_player.get("base_price")
+        updated_runs = runs if runs is not None else existing_player.get("total_runs", 0)
+        updated_highest = highest_score if highest_score is not None else existing_player.get("highest_runs", 0)
+        updated_wickets = wickets if wickets is not None else existing_player.get("wickets_taken", 0)
+        updated_outs = outs if outs is not None else existing_player.get("times_out", 0)
+
+        cursor.execute("""
+            UPDATE players
+            SET name = %s,
+                nickname = %s,
+                age = %s,
+                gender = %s,
+                category = %s,
+                type = %s,
+                jersey = %s,
+                mobile_no = %s,
+                email_id = %s,
+                base_price = %s,
+                total_runs = %s,
+                highest_runs = %s,
+                wickets_taken = %s,
+                times_out = %s,
+                image_path = %s
+            WHERE id = %s
+        """, (
+            updated_name,
+            updated_nickname,
+            updated_age,
+            updated_gender,
+            updated_category,
+            updated_type,
+            updated_jersey,
+            updated_mobile,
+            updated_email,
+            updated_base_price,
+            updated_runs,
+            updated_highest,
+            updated_wickets,
+            updated_outs,
+            image_path,
+            player_id
+        ))
+
+        # Update player_teams if teams supplied
+        if teams:
+            team_ids = [int(t.strip()) for t in teams.split(",") if t.strip().isdigit()]
+            cursor.execute("DELETE FROM player_teams WHERE player_id = %s", (player_id,))
+            for tid in team_ids:
+                cursor.execute(
+                    "INSERT INTO player_teams (player_id, team_id) VALUES (%s, %s)",
+                    (player_id, tid)
+                )
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Player updated successfully",
+            "player_id": player_id
+        }
+
+    except HTTPException:
+        conn.rollback()
+        raise
+    except pymysql.IntegrityError:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail="Player with same name or jersey number exists")
+    except Exception as e:
+        conn.rollback()
+        print("❌ update-player error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+#---------- DELETE PLAYER (DELETE /players/{player_id}) ------------
+@router.delete("/players/{player_id}")
+def delete_player(player_id: int, request: Request):
+    token = get_token_from_request(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication token required")
+    payload = verify_token(token)
+    if not payload or payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+    try:
+        cursor.execute("SELECT * FROM players WHERE id = %s", (player_id,))
+        player = cursor.fetchone()
+        if not player:
+            raise HTTPException(status_code=404, detail="Player not found")
+
+        image_path = player.get("image_path")
+        if image_path:
+            delete_image_from_supabase(image_path)
+
+        cursor.execute("DELETE FROM players WHERE id = %s", (player_id,))
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Player deleted successfully",
+            "player_id": player_id
+        }
+
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        print("❌ delete-player error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()

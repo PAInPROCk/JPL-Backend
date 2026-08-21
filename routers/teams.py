@@ -6,6 +6,13 @@ import os
 import io
 import uuid
 from typing import Optional
+from PIL import Image
+from core.image_handler import (
+    validate_image_bytes,
+    crop_and_resize_to_square,
+    compress_to_webp,
+    delete_image_from_supabase
+)
 
 
 
@@ -237,6 +244,158 @@ async def add_team(
         print("❌ add-team error:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+    finally:
+        cursor.close()
+        conn.close()
+
+
+#---------- UPDATE TEAM (PUT /team/{team_id}) ------------
+@router.put("/team/{team_id}")
+async def update_team(
+    team_id: int,
+    request: Request,
+    teamName: Optional[str] = Form(None),
+    captain: Optional[str] = Form(None),
+    mobile: Optional[str] = Form(None),
+    emailId: Optional[str] = Form(None),
+    teamRank: Optional[int] = Form(None),
+    totalBudget: Optional[float] = Form(None),
+    seasonBudget: Optional[float] = Form(None),
+    image: Optional[UploadFile] = File(None)
+):
+    token = get_token_from_request(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication token required")
+    payload = verify_token(token)
+    if not payload or payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+    try:
+        cursor.execute("SELECT * FROM teams WHERE team_id = %s", (team_id,))
+        existing_team = cursor.fetchone()
+        if not existing_team:
+            raise HTTPException(status_code=404, detail="Team not found")
+
+        image_path = existing_team.get("image_path")
+        if image and image.filename:
+            image_bytes = await image.read()
+            validate_image_bytes(image_bytes)
+            pil_img = Image.open(io.BytesIO(image_bytes))
+            cropped_img = crop_and_resize_to_square(pil_img, 400)
+            webp_bytes = compress_to_webp(cropped_img)
+
+            from core.supabase_client import get_supabase_admin_client
+            supabase_admin = get_supabase_admin_client()
+            filename = f"teams/{uuid.uuid4().hex}.webp"
+            supabase_admin.storage.from_("auctra-uploads").upload(
+                path=filename,
+                file=webp_bytes,
+                file_options={"content-type": "image/webp", "upsert": "true"}
+            )
+            new_image_path = supabase_admin.storage.from_("auctra-uploads").get_public_url(filename)
+            if image_path:
+                delete_image_from_supabase(image_path)
+            image_path = new_image_path
+
+        updated_name = teamName if teamName is not None else existing_team["name"]
+        updated_captain = captain if captain is not None else existing_team.get("captain")
+        updated_mobile = mobile if mobile is not None else existing_team.get("mobile_no")
+        updated_email = emailId if emailId is not None else existing_team.get("email_id")
+        updated_rank = teamRank if teamRank is not None else existing_team.get("team_rank", 0)
+        updated_total_budget = totalBudget if totalBudget is not None else existing_team.get("total_budget", 0.0)
+        updated_season_budget = seasonBudget if seasonBudget is not None else existing_team.get("season_budget", 0.0)
+
+        cursor.execute("""
+            UPDATE teams
+            SET name = %s,
+                captain = %s,
+                mobile_no = %s,
+                email_id = %s,
+                team_rank = %s,
+                total_budget = %s,
+                season_budget = %s,
+                image_path = %s
+            WHERE team_id = %s
+        """, (
+            updated_name,
+            updated_captain,
+            updated_mobile,
+            updated_email,
+            updated_rank,
+            updated_total_budget,
+            updated_season_budget,
+            image_path,
+            team_id
+        ))
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Team updated successfully",
+            "team_id": team_id
+        }
+
+    except HTTPException:
+        conn.rollback()
+        raise
+    except pymysql.IntegrityError:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail="Team name already exists")
+    except Exception as e:
+        conn.rollback()
+        print("❌ update-team error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+#---------- DELETE TEAM (DELETE /team/{team_id}) ------------
+@router.delete("/team/{team_id}")
+def delete_team(team_id: int, request: Request):
+    token = get_token_from_request(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication token required")
+    payload = verify_token(token)
+    if not payload or payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+    try:
+        cursor.execute("SELECT * FROM teams WHERE team_id = %s", (team_id,))
+        team = cursor.fetchone()
+        if not team:
+            raise HTTPException(status_code=404, detail="Team not found")
+
+        image_path = team.get("image_path")
+        if image_path:
+            delete_image_from_supabase(image_path)
+
+        cursor.execute("DELETE FROM teams WHERE team_id = %s", (team_id,))
+        conn.commit()
+
+        return {
+            "success": True,
+            "message": "Team deleted successfully",
+            "team_id": team_id
+        }
+
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        print("❌ delete-team error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         cursor.close()
         conn.close()
