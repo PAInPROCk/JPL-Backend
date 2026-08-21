@@ -1258,5 +1258,134 @@ async def undo_sale(request: Request):
         cursor.close()
         conn.close()
 
+@router.post("/restart-player")
+async def restart_player(request: Request):
+    """
+    Restarts an auction for a specific player (whether unsold, sold, or unbidded):                                 
+        1. Validates Admin token.                                                                                      
+        2. Cancels any active background timer task.                                                                   
+        3. Removes player from unsold_players (or sold_players with purse refund).                                     
+        4. Clears current_auction and live_bids tables.                                                                
+        5. Inserts new record in current_auction for specified player_id.                                              
+        6. Registers in-memory auction_expiry and spawns background_timer.                                             
+        7. Broadcasts 'auction_started' event to connected clients.  
+    """
+    token = get_token_from_request(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
+    payload = verify_token(token)
+    if not payload or payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
 
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    player_id = data.get("player_id")
+    duration = data.get("duration", 120)
+
+    if not player_id:
+        raise HTTPException(status_code=400, detail="player_id is required")
+
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+
+    try:
+        #1. Stop any current active auction timer task
+        cursor.execute("SELECT player_id FROM current_auction LIMIT 1")
+        active= cursor.fetchone()
+        if active:
+            stop_timer_task(active["player_id"])
+
+        #2. clear current auction & live bids table
+        cursor.execute("DELETE FROM current_auction")
+        cursor.execute("DELEtE FROM live_bids")
+
+        #3. Clean player from unsold_players if present
+        cursor.execute("DELETE FROM unsold_players WHERE player_id = %s", (player_id,))
+
+        #4. Clean player from sold_players if present (and refund winning team purse)
+        cursor.execute("SELECT team_id, sold_price FROM sold_players WHERE player_id = %s", (player_id,))
+        sold_rec = cursor.fetchone()
+        if sold_rec:
+            winning_team_id = sold_rec["team_id"]
+            sold_price = float(sold_rec["sold_price"] or 0)
+            cursor.execute("""
+                UPDATE teams
+                SET purse = purse + %s,
+                    players_bought = GREATEST(0, players_bought - 1)
+                WHERE team_id = %s
+            """, (sold_price, winning_team_id))
+            cursor.execute("DELETE FROM sold_players WHERE player_id = %s", (player_id,))
+
+        #5. Check if player exists in players table
+        cursor.execute("SELECT * FROM players WHERE id = %s", (player_id,))
+        player = cursor.fetchone()
+        if not player:
+            raise HTTPException(status_code= 404, detail=f"Player with ID {player_id} not found")
+
+        #Convert Decimal values for JSON safety
+        for k,v in player.items():
+            if isinstance(v, Decimal):
+                player[k] = float(v)
+
+        #6. Insert new current_auction row
+        start_time = datetime.now(timezone.utc)
+        expires_at = start_time + timedelta(seconds=duration)
+
+        cursor.execute("""
+            INSERT INTO current_auction
+            (player_id, start_time, expires_at, auction_duration, mode)
+            VALUES(%s,%s,%s,%s,%s)
+        """,(player_id, start_time, expires_at, duration, "specific"))
+
+        conn.commit()
+
+        #7. Update in-memory timer expiry tracking
+        auction_expiry[player_id] = expires_at
+
+        #8. Broadcast 'auction_started' event to connected Socket clients
+        await sio.emit("auction_started",{
+            "player_id": player_id,
+            "player_name": player["name"],
+            "player": player,
+            "mode": "specific",
+            "duration": duration,
+            "expires_at": expires_at.isoformat(),
+            "history": []
+        })
+
+        # 9. Spawn background timer task                                                                           
+        asyncio.create_task(                                                                                       
+            background_timer(                                                                                      
+                player_id,                                                                                         
+                "specific",                                                                                        
+                payload.get("session_id")                                                                          
+            )                                                                                                      
+        )                                                                                                          
+                                                                                                                       
+        print(f"🚀 Re-started auction for player {player['name']} (ID: {player_id})")                              
+                                                                                                                       
+        return {                                                                                                   
+            "status": "auction_restarted",                                                                         
+            "player_id": player_id,                                                                                
+            "player_name": player["name"],                                                                         
+            "duration": duration,                                                                                  
+            "expires_at": expires_at.isoformat()                                                                   
+        }                                                                                                          
+                                                                                                                       
+    except HTTPException:                                                                                          
+        conn.rollback()                                                                                            
+        raise                                                                                                      
+    except Exception as e:                                                                                         
+        conn.rollback()                                                                                            
+        print("❌ Error in restart_player:", e)                                                                    
+        raise HTTPException(status_code=500, detail=str(e))                                                        
+    finally:                                                                                                       
+        cursor.close()                                                                                             
+        conn.close() 
