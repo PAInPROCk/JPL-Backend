@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import pymysql
 import asyncio
 from decimal import Decimal
-from auction.auction_engine import background_timer
+from auction.auction_engine import background_timer, stop_timer_task, auction_expiry
 from core.database import get_db_connection
 from auth.auth_handler import verify_token, get_token_from_request
 from sockets.socket_manager import sio, team_sockets
