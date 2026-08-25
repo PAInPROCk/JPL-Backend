@@ -520,8 +520,9 @@ async def upload_players(request: Request, file: UploadFile = File(...)):
                 print(f"⚠️ Error cleaning up temp dir: {rmtree_err}")
 
 
-#---------- UPDATE PLAYER (PUT /players/{player_id}) ------------
+#---------- UPDATE PLAYER (PUT /players/{player_id} & PUT /player/{player_id}) ------------
 @router.put("/players/{player_id}")
+@router.put("/player/{player_id}")
 async def update_player(
     player_id: int,
     request: Request,
@@ -550,6 +551,38 @@ async def update_player(
     payload = verify_token(token)
     if not payload or payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    # If application/json was sent, extract fields from JSON body
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            json_body = await request.json()
+            name_val = json_body.get("name")
+            if name_val and not firstName:
+                parts = name_val.strip().split()
+                firstName = parts[0] if parts else None
+                lastName = " ".join(parts[1:]) if len(parts) > 1 else None
+            else:
+                firstName = json_body.get("firstName", firstName)
+                middleName = json_body.get("middleName", middleName)
+                lastName = json_body.get("lastName", lastName)
+
+            nickName = json_body.get("nickName") or json_body.get("nickname") or nickName
+            age = json_body.get("age", age)
+            gender = json_body.get("gender", gender)
+            category = json_body.get("category", category)
+            playerType = json_body.get("playerType") or json_body.get("type") or playerType
+            jerseyNo = json_body.get("jerseyNo") or json_body.get("jersey") or jerseyNo
+            mobile = json_body.get("mobile") or json_body.get("mobile_no") or mobile
+            emailId = json_body.get("emailId") or json_body.get("email_id") or emailId
+            basePrice = json_body.get("basePrice") or json_body.get("base_price") or basePrice
+            runs = json_body.get("runs") or json_body.get("total_runs") or runs
+            highest_score = json_body.get("highest_score") or json_body.get("highest_runs") or highest_score
+            wickets = json_body.get("wickets") or json_body.get("wickets_taken") or wickets
+            outs = json_body.get("outs") or json_body.get("times_out") or outs
+            teams = json_body.get("teams", teams)
+        except Exception:
+            pass
 
     conn = get_db_connection()
     if conn is None:
@@ -643,7 +676,7 @@ async def update_player(
 
         # Update player_teams if teams supplied
         if teams:
-            team_ids = [int(t.strip()) for t in teams.split(",") if t.strip().isdigit()]
+            team_ids = [int(t.strip()) for t in str(teams).split(",") if t.strip().isdigit()]
             cursor.execute("DELETE FROM player_teams WHERE player_id = %s", (player_id,))
             for tid in team_ids:
                 cursor.execute(
@@ -674,8 +707,9 @@ async def update_player(
         conn.close()
 
 
-#---------- DELETE PLAYER (DELETE /players/{player_id}) ------------
+#---------- DELETE PLAYER (DELETE /players/{player_id} & DELETE /player/{player_id}) ------------
 @router.delete("/players/{player_id}")
+@router.delete("/player/{player_id}")
 def delete_player(player_id: int, request: Request):
     token = get_token_from_request(request)
     if not token:
@@ -697,14 +731,26 @@ def delete_player(player_id: int, request: Request):
 
         image_path = player.get("image_path")
         if image_path:
-            delete_image_from_supabase(image_path)
+            try:
+                delete_image_from_supabase(image_path)
+            except Exception as img_err:
+                print(f"⚠️ Warning deleting player image: {img_err}")
 
+        # Clean related records across tables
+        cursor.execute("DELETE FROM current_auction WHERE player_id = %s", (player_id,))
+        cursor.execute("DELETE FROM live_bids WHERE player_id = %s", (player_id,))
+        cursor.execute("DELETE FROM bids WHERE player_id = %s", (player_id,))
+        cursor.execute("DELETE FROM sold_players WHERE player_id = %s", (player_id,))
+        cursor.execute("DELETE FROM unsold_players WHERE player_id = %s", (player_id,))
+        cursor.execute("DELETE FROM player_teams WHERE player_id = %s", (player_id,))
+
+        # Delete player
         cursor.execute("DELETE FROM players WHERE id = %s", (player_id,))
         conn.commit()
 
         return {
             "success": True,
-            "message": "Player deleted successfully",
+            "message": f"Player '{player.get('name')}' (ID: {player_id}) deleted successfully",
             "player_id": player_id
         }
 
