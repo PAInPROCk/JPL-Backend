@@ -28,25 +28,25 @@ def login(data: dict, response: Response):
         team_id = sb_user.user_metadata.get("team_id")
         name = sb_user.user_metadata.get("name", "")
         
-        # Fetch team details from Postgres
-        conn = get_db_connection()
+        # Fetch team details from Postgres (only for team accounts)
         team_purse = 0.0
         team_logo = None
         
-        if conn:
-            cursor = conn.cursor()
-            try:
-                if team_id:
+        if team_id:
+            conn = get_db_connection()
+            if conn:
+                cursor = conn.cursor()
+                try:
                     cursor.execute("SELECT purse, image_path FROM teams WHERE team_id = %s", (int(team_id),))
                     team_row = cursor.fetchone()
                     if team_row:
                         team_purse = float(team_row["purse"]) if team_row["purse"] else 0.0
                         team_logo = team_row["image_path"]
-            except Exception as dbe:
-                print("DB team query error:", dbe)
-            finally:
-                cursor.close()
-                conn.close()
+                except Exception as dbe:
+                    print("DB team query error:", dbe)
+                finally:
+                    cursor.close()
+                    conn.close()
         
         # Set HTTP-only Cookie for browser compatibility
         response.set_cookie(
