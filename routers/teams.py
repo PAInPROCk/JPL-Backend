@@ -83,9 +83,14 @@ def get_team_by_id(team_id: int):
 
         squad = cursor.fetchall()
 
+        # Fetch team details
+        cursor.execute("SELECT * FROM teams WHERE team_id = %s", (team_id,))
+        team_row = cursor.fetchone()
+
         return {
             "success": True,
             "team_id": team_id,
+            "team": team_row,
             "players": squad
         }
     
