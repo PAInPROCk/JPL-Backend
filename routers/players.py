@@ -145,7 +145,7 @@ def players_with_teams():
         conn.close()
 
 @router.get("/players/{player_id}")
-async def get_player(player_id: int, role: str):
+async def get_player(player_id: int, role: str = "player"):
 
     conn = get_db_connection()
     cursor = conn.cursor(pymysql.cursors.DictCursor)
@@ -169,7 +169,14 @@ async def get_player(player_id: int, role: str):
 
         # default → player
         cursor.execute(
-            "SELECT * FROM players WHERE id=%s",
+            """SELECT p.*,
+                      COALESCE(string_agg(DISTINCT t.name, ', ' ORDER BY t.name), '') AS teams_played,
+                      COALESCE(string_agg(DISTINCT pt.team_id::text, ','), '') AS team_ids
+               FROM players p
+               LEFT JOIN player_teams pt ON p.id = pt.player_id
+               LEFT JOIN teams t ON pt.team_id = t.team_id
+               WHERE p.id=%s
+               GROUP BY p.id""",
             (player_id,)
         )
 
@@ -529,20 +536,26 @@ async def update_player(
     firstName: Optional[str] = Form(None),
     middleName: Optional[str] = Form(None),
     lastName: Optional[str] = Form(None),
+    playerName: Optional[str] = Form(None),
+    fatherName: Optional[str] = Form(None),
+    surName: Optional[str] = Form(None),
     nickName: Optional[str] = Form(None),
     age: Optional[int] = Form(None),
     gender: Optional[str] = Form(None),
     category: Optional[str] = Form(None),
     playerType: Optional[str] = Form(None),
+    style: Optional[str] = Form(None),
     jerseyNo: Optional[int] = Form(None),
     mobile: Optional[str] = Form(None),
     emailId: Optional[str] = Form(None),
     basePrice: Optional[float] = Form(None),
     runs: Optional[int] = Form(None),
+    totalRuns: Optional[int] = Form(None),
     highest_score: Optional[int] = Form(None),
+    highestRuns: Optional[int] = Form(None),
     wickets: Optional[int] = Form(None),
     outs: Optional[int] = Form(None),
-    teams: Optional[str] = Form(None),
+    teams: Optional[List[str]] = Form(None),
     image: Optional[UploadFile] = File(None)
 ):
     token = get_token_from_request(request)
@@ -551,6 +564,14 @@ async def update_player(
     payload = verify_token(token)
     if not payload or payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    # Resolve aliases
+    firstName = firstName or playerName
+    middleName = middleName or fatherName
+    lastName = lastName or surName
+    runs = runs if runs is not None else totalRuns
+    highest_score = highest_score if highest_score is not None else highestRuns
+    playerType = playerType or style
 
     # If application/json was sent, extract fields from JSON body
     content_type = request.headers.get("content-type", "")
@@ -675,10 +696,20 @@ async def update_player(
         ))
 
         # Update player_teams if teams supplied
-        if teams:
-            team_ids = [int(t.strip()) for t in str(teams).split(",") if t.strip().isdigit()]
+        if teams is not None:
+            team_ids = []
+            if isinstance(teams, (list, tuple)):
+                for t in teams:
+                    for sub in str(t).split(","):
+                        if sub.strip().isdigit():
+                            team_ids.append(int(sub.strip()))
+            elif isinstance(teams, str):
+                for sub in teams.split(","):
+                    if sub.strip().isdigit():
+                        team_ids.append(int(sub.strip()))
+
             cursor.execute("DELETE FROM player_teams WHERE player_id = %s", (player_id,))
-            for tid in team_ids:
+            for tid in set(team_ids):
                 cursor.execute(
                     "INSERT INTO player_teams (player_id, team_id) VALUES (%s, %s)",
                     (player_id, tid)
