@@ -327,14 +327,15 @@ async def add_player(
         # -------- INSERT PLAYER --------
         cursor.execute("""
             INSERT INTO players 
-            (name, nickname, age, category, type, base_price, total_runs, highest_runs, 
+            (name, nickname, age, gender, category, type, base_price, total_runs, highest_runs, 
              wickets_taken, times_out, image_path, jersey, mobile_no, email_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
             full_name,
             nickName,
             age,
+            gender,
             category,
             style,
             basePrice,
